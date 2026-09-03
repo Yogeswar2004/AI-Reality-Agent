@@ -9,8 +9,7 @@ import {
   useMap,
 } from "@vis.gl/react-google-maps";
 
-const API_URL = "http://localhost:5000/api";
-
+const API_URL = import.meta.env.VITE_API_URL;
 const DEFAULT_CENTER = {
   lat: 16.5062,
   lng: 80.648,
