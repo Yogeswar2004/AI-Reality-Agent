@@ -1,13 +1,37 @@
-import { GoogleGenAI } from "@google/genai";
-
-const ai = new GoogleGenAI({
-apiKey: process.env.GEMINI_API_KEY,
-});
+import gemini from "../config/gemini.js";
 
 const sleep = (ms) =>
 new Promise((resolve) =>
 setTimeout(resolve, ms)
 );
+
+const getMockReviewAnalysis = (reviews) => ({
+summary:
+  "Mock test data: customers value helpful service and quality, while wait times and communication are recurring improvement areas.",
+strengths: [
+  "Mock test data: helpful staff",
+  "Mock test data: reliable service quality",
+],
+weaknesses: [
+  "Mock test data: inconsistent waiting times",
+  "Mock test data: booking communication could improve",
+],
+commonComplaints: [
+  "Mock test data: longer-than-expected waits",
+  "Mock test data: limited booking updates",
+],
+customerLikes: [
+  "Mock test data: friendly service",
+  "Mock test data: clean environment",
+],
+opportunities: [
+  "Mock test data: provide accurate wait-time updates",
+  "Mock test data: make booking communication proactive",
+],
+overallSentiment: "Mostly Positive",
+confidence: "Medium",
+reviewsAnalyzed: reviews.length,
+});
 
 /**
 
@@ -19,7 +43,10 @@ setTimeout(resolve, ms)
   reviews,
   }) => {
   try {
-  if (!process.env.GEMINI_API_KEY) {
+  if (
+  process.env.MOCK_MODE !== "true" &&
+  !process.env.GEMINI_API_KEY
+  ) {
   throw new Error(
   "GEMINI_API_KEY is not configured in .env"
   );
@@ -49,6 +76,10 @@ setTimeout(resolve, ms)
   
 
   };
+  }
+
+  if (process.env.MOCK_MODE === "true") {
+  return getMockReviewAnalysis(reviews);
   }
 
   console.log(
@@ -206,7 +237,7 @@ for (
     );
 
     response =
-      await ai.models.generateContent({
+      await gemini.models.generateContent({
         model: "gemini-3.5-flash",
 
         contents: prompt,

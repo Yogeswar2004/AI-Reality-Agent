@@ -1,11 +1,65 @@
 
-import { GoogleGenAI } from "@google/genai";
-
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-});
+import gemini from "../config/gemini.js";
 
 const MODEL = "gemini-3.5-flash";
+
+const getMockLocalAnalysis = ({
+  businessType,
+  competition,
+  reviewInsights,
+}) => ({
+  overallVerdict: "Possible Opportunity",
+  opportunityScore: 64,
+  competitionScore: competition.score,
+  competitionLevel: competition.level,
+  marketSummary:
+    `Mock test data: the supplied ${businessType} competitor sample shows a market worth validating before launch.`,
+  competitionSummary:
+    `Mock test data: ${competition.totalCompetitors} nearby competitors were included in the test sample.`,
+  customerInsights: {
+    whatCustomersLike: [
+      "Mock test data: friendly service",
+      "Mock test data: reliable quality",
+    ],
+    commonComplaints: [
+      "Mock test data: wait times",
+      "Mock test data: booking communication",
+    ],
+    unmetNeeds: [
+      "Mock test data: predictable appointment updates",
+      "Mock test data: faster service for simple requests",
+    ],
+  },
+  competitorStrengths: [
+    "Mock test data: established review volume",
+    "Mock test data: generally positive customer sentiment",
+  ],
+  competitorWeaknesses: [
+    "Mock test data: inconsistent waiting experience",
+    "Mock test data: communication gaps",
+  ],
+  businessOpportunities: [
+    "Mock test data: compete on transparent wait times",
+    "Mock test data: offer proactive booking updates",
+  ],
+  differentiationStrategies: [
+    "Mock test data: guarantee appointment-time communication",
+    "Mock test data: design a faster express service option",
+  ],
+  risks: [
+    "Mock test data: competitor sample may not represent the full local market",
+    "Mock test data: demand must be validated with real customers",
+  ],
+  recommendations: [
+    "Mock test data: interview local customers before committing capital",
+    "Mock test data: verify demand and pricing with a small pilot",
+  ],
+  recommendedNextSteps: [
+    "Mock test data: map additional competitors",
+    "Mock test data: test a differentiated service offer",
+    `Mock test data: review ${reviewInsights.totalReviewsAnalyzed} sampled reviews with prospective customers`,
+  ],
+});
 
 /**
  * Generate the final AI analysis for a local business idea.
@@ -26,6 +80,14 @@ const localBusinessAnalyzer = async ({
   reviewInsights,
 }) => {
   try {
+    if (process.env.MOCK_MODE === "true") {
+      return getMockLocalAnalysis({
+        businessType,
+        competition,
+        reviewInsights,
+      });
+    }
+
     if (!process.env.GEMINI_API_KEY) {
       throw new Error(
         "GEMINI_API_KEY is not configured in .env"
@@ -158,7 +220,7 @@ Return valid JSON only.
           `Local business analysis attempt ${attempt}/3...`
         );
 
-        const response = await ai.models.generateContent({
+        const response = await gemini.models.generateContent({
           model: MODEL,
           contents: prompt,
         });

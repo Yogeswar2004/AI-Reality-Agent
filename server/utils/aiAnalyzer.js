@@ -189,7 +189,93 @@ analyzedAt: new Date(),
 };
 };
 
+const getMockAnalysis = () => ({
+overallScore: 68,
+competition: "Medium",
+demand: "High",
+development: "Medium",
+monetization: "Medium",
+seo: "Medium",
+scores: {
+  competition: 58,
+  demand: 72,
+  development: 62,
+  monetization: 65,
+  seo: 55,
+},
+targetUsers: [
+  "Mock test early adopters",
+  "Mock test small teams",
+  "Mock test independent professionals",
+],
+competitors: [
+  "Mock Test Competitor One",
+  "Mock Test Competitor Two",
+  "Mock Test Competitor Three",
+],
+differentiation: [
+  "Mock test data: focus on one narrow user workflow",
+  "Mock test data: provide clearer onboarding",
+  "Mock test data: validate pricing before expanding features",
+],
+requiredApis: [
+  "Mock Test Authentication API",
+  "Mock Test Analytics API",
+],
+estimatedCost: "$5,000 - $15,000 (mock test data)",
+strengths: [
+  "Mock test data: clear problem framing",
+  "Mock test data: focused MVP scope",
+  "Mock test data: recurring-use potential",
+],
+weaknesses: [
+  "Mock test data: market evidence has not been verified",
+  "Mock test data: differentiation needs user validation",
+  "Mock test data: acquisition channel is unspecified",
+],
+marketRisks: [
+  "Mock test data: established alternatives may already exist",
+  "Mock test data: users may not switch from current workflows",
+  "Mock test data: pricing assumptions need validation",
+],
+monetizationStrategies: [
+  "Mock test data: subscription tiers",
+  "Mock test data: usage-based plan",
+  "Mock test data: team plan",
+],
+mvpFeatures: [
+  "Mock test data: user sign-in",
+  "Mock test data: core workflow",
+  "Mock test data: saved results",
+  "Mock test data: basic dashboard",
+  "Mock test data: feedback capture",
+],
+roadmap: [
+  {
+    phase: "Phase 1",
+    title: "Mock Test Validation",
+    description: "Interview target users and test the problem statement.",
+  },
+  {
+    phase: "Phase 2",
+    title: "Mock Test MVP",
+    description: "Build only the core workflow and collect feedback.",
+  },
+  {
+    phase: "Phase 3",
+    title: "Mock Test Measurement",
+    description: "Measure retention, willingness to pay, and usability.",
+  },
+],
+recommendation:
+  "Mock test data: validate the problem with users before committing to a full build.",
+});
+
 const aiAnalyzer = async (idea) => {
+if (process.env.MOCK_MODE === "true") {
+return validateAnalysis(getMockAnalysis());
+}
+
 const prompt = `
 You are an expert startup analyst, product strategist,
 market researcher, and software architect.

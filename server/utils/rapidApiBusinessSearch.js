@@ -14,6 +14,43 @@ const RAPIDAPI_URL =
 const RAPIDAPI_HOST =
 "local-business-data.p.rapidapi.com";
 
+const getMockBusinesses = ({
+businessType,
+latitude,
+longitude,
+limit,
+}) => {
+const offsets = [
+  { latitude: 0.001, longitude: 0.001, rating: 4.4, reviewCount: 320 },
+  { latitude: -0.003, longitude: 0.002, rating: 4.1, reviewCount: 180 },
+  { latitude: 0.007, longitude: -0.002, rating: 4.6, reviewCount: 760 },
+  { latitude: -0.012, longitude: -0.004, rating: 3.9, reviewCount: 95 },
+  { latitude: 0.018, longitude: 0.009, rating: 4.2, reviewCount: 410 },
+];
+
+return offsets.slice(0, Math.max(0, Number(limit) || 0)).map((offset, index) => ({
+name: `Mock Test ${businessType} Competitor ${index + 1}`,
+placeId: `mock-test-place-${index + 1}`,
+latitude: latitude + offset.latitude,
+longitude: longitude + offset.longitude,
+address: `${index + 1} Mock Test Market Street`,
+rating: offset.rating,
+reviewCount: offset.reviewCount,
+businessStatus: "OPERATIONAL (MOCK TEST DATA)",
+website: `https://mock-test-competitor-${index + 1}.example.test`,
+phone: `+1-555-010${index + 1}`,
+categories: [businessType, "Mock Test Data"],
+openingStatus: true,
+workingHours: "Mock test hours: 09:00-18:00",
+reviewsPerRating: null,
+photos: [],
+raw: {
+  source: "MOCK_TEST_DATA",
+  index: index + 1,
+},
+}));
+};
+
 /**
 
 * Search nearby businesses
@@ -33,6 +70,30 @@ const RAPIDAPI_HOST =
   limit = 5,
   }) => {
   try {
+  if (process.env.MOCK_MODE === "true") {
+  if (!businessType) {
+  throw new Error(
+  "Business type is required"
+  );
+  }
+
+  if (
+  typeof latitude !== "number" ||
+  typeof longitude !== "number"
+  ) {
+  throw new Error(
+  "Valid latitude and longitude are required"
+  );
+  }
+
+  return getMockBusinesses({
+  businessType,
+  latitude,
+  longitude,
+  limit,
+  });
+  }
+
   if (!process.env.RAPIDAPI_KEY) {
   throw new Error(
   "RAPIDAPI_KEY is not configured in .env"

@@ -6,6 +6,56 @@ const REVIEWS_URL =
 const RAPIDAPI_HOST =
   "local-business-data.p.rapidapi.com";
 
+const getMockReviews = ({ businessId, limit }) => {
+  const reviews = [
+    {
+      reviewerName: "Mock Test Reviewer One",
+      rating: 5,
+      text: "Mock test data: friendly staff and fast service.",
+      date: "2025-01-15",
+      reviewId: `${businessId}-mock-review-1`,
+    },
+    {
+      reviewerName: "Mock Test Reviewer Two",
+      rating: 3,
+      text: "Mock test data: service was useful but the wait was longer than expected.",
+      date: "2025-01-20",
+      reviewId: `${businessId}-mock-review-2`,
+    },
+    {
+      reviewerName: "Mock Test Reviewer Three",
+      rating: 4,
+      text: "Mock test data: good quality and reasonable value.",
+      date: "2025-02-01",
+      reviewId: `${businessId}-mock-review-3`,
+    },
+    {
+      reviewerName: "Mock Test Reviewer Four",
+      rating: 2,
+      text: "Mock test data: booking updates and communication could improve.",
+      date: "2025-02-10",
+      reviewId: `${businessId}-mock-review-4`,
+    },
+    {
+      reviewerName: "Mock Test Reviewer Five",
+      rating: 5,
+      text: "Mock test data: clean environment and helpful team.",
+      date: "2025-02-15",
+      reviewId: `${businessId}-mock-review-5`,
+    },
+  ];
+
+  return reviews
+    .slice(0, Math.max(0, Number(limit) || 0))
+    .map((review) => ({
+      ...review,
+      language: "en",
+      source: "Mock Test Data",
+      ownerResponse: null,
+      raw: { ...review, source: "MOCK_TEST_DATA" },
+    }));
+};
+
 /**
  * Get customer reviews for a business
  *
@@ -22,15 +72,28 @@ const getBusinessReviews = async ({
     // Validate RapidAPI configuration
     // ----------------------------------------
 
+    // ----------------------------------------
+    // Validate business ID
+    // ----------------------------------------
+
+    if (process.env.MOCK_MODE === "true") {
+      if (!businessId?.trim()) {
+        throw new Error(
+          "Business ID is required"
+        );
+      }
+
+      return getMockReviews({
+        businessId: businessId.trim(),
+        limit,
+      });
+    }
+
     if (!process.env.RAPIDAPI_KEY) {
       throw new Error(
         "RAPIDAPI_KEY is not configured in .env"
       );
     }
-
-    // ----------------------------------------
-    // Validate business ID
-    // ----------------------------------------
 
     if (!businessId?.trim()) {
       throw new Error(
