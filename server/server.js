@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import { connectDB } from "./config/db.js";
 import authRoutes from "./routes/authRoutes.js";
 import ideaRoutes from "./routes/ideaRoutes.js";
+import agentRoutes from "./agent/agentRoutes.js";
 
 dotenv.config();
 
@@ -41,6 +42,7 @@ message: "Server is healthy",
 
 app.use("/api/auth", authRoutes);
 app.use("/api/ideas", ideaRoutes);
+app.use("/api/agent", agentRoutes);
 
 const startServer = async () => {
 await connectDB();
