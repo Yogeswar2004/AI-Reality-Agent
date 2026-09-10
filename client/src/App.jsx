@@ -11,6 +11,7 @@ import AnalyzeIdea from "./pages/AnalyzeIdea";
 import AnalysisResults from "./pages/AnalysisResults";
 import MyIdeas from "./pages/MyIdeas";
 import CompareIdeas from "./pages/CompareIdeas";
+import Agent from "./pages/Agent";
 
 function App() {
   return (
@@ -57,6 +58,11 @@ function App() {
           <Route
             path="/compare"
             element={<CompareIdeas />}
+          />
+
+          <Route
+            path="/agent"
+            element={<Agent />}
           />
         </Route>
       </Routes>
