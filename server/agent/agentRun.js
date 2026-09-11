@@ -230,6 +230,36 @@ const claimAgentRunStep = async ({ runId, userId, isExternal = false }) => {
   return serializeAgentRun(updatedRun);
 };
 
+const updateAgentRunPlan = async ({ runId, userId, plan }) => {
+  if (!ObjectId.isValid(runId)) {
+    return null;
+  }
+
+  const collection = getDB().collection(AGENT_RUNS_COLLECTION);
+  const updatedRun = await collection.findOneAndUpdate(
+    {
+      _id: new ObjectId(runId),
+      userId,
+    },
+    {
+      $set: {
+        plan,
+        updatedAt: new Date(),
+      },
+    },
+    {
+      returnDocument: "after",
+      includeResultMetadata: false,
+    }
+  );
+
+  if (!updatedRun) {
+    return null;
+  }
+
+  return serializeAgentRun(updatedRun);
+};
+
 // Indexes for agent_runs
 const initAgentRunIndexes = async () => {
   try {
@@ -253,5 +283,6 @@ export {
   claimAgentRunStep,
   createAgentRun,
   getAgentRunById,
+  updateAgentRunPlan,
   updateAgentRunState,
 };
