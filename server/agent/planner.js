@@ -169,6 +169,15 @@ const evaluateNextStep = async ({ runId, userId }) => {
     };
   }
 
+  // 4. In SYNTHESIZING state: advisory recommendation to synthesize
+  if (run.state === AGENT_STATES.SYNTHESIZING) {
+    return {
+      action: "SYNTHESIZE",
+      message:
+        "Run is in synthesizing state, ready for final recommendation generation",
+    };
+  }
+
   return {
     action: run.state.toUpperCase(),
     state: run.state,

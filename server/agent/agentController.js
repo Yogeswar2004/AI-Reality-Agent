@@ -1,8 +1,10 @@
 import { ObjectId } from "mongodb";
 import {
   AgentRunStateError,
+  claimAgentRunSynthesis,
   createAgentRun as createRun,
   getAgentRunById,
+  saveAgentRunFinalOutput,
   updateAgentRunPlan,
   updateAgentRunState as updateRunState,
 } from "./agentRun.js";
@@ -18,6 +20,10 @@ import {
   evaluateNextStep,
   generatePlan,
 } from "./planner.js";
+import {
+  SynthesizerError,
+  synthesizeFinalRecommendation,
+} from "./synthesizer.js";
 
 const createAgentRun = async (req, res) => {
   try {
@@ -401,6 +407,202 @@ const approveRunPlan = async (req, res) => {
   }
 };
 
+const synthesizeRunOutput = async (req, res) => {
+  try {
+    const runId = req.params.id;
+    const userId = req.user.userId;
+
+    if (!ObjectId.isValid(runId)) {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_RUN_ID",
+        message: "Invalid run ID",
+      });
+    }
+
+    const run = await getAgentRunById({ id: runId, userId });
+    if (!run) {
+      return res.status(404).json({
+        success: false,
+        code: "RUN_NOT_FOUND",
+        message: "Agent run not found or access denied",
+      });
+    }
+
+    const allowedStates = new Set([
+      AGENT_STATES.EXECUTING,
+      AGENT_STATES.SYNTHESIZING,
+    ]);
+    if (!allowedStates.has(run.state)) {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_STATE",
+        message: `Cannot synthesize run in state '${run.state}' (must be '${AGENT_STATES.EXECUTING}' or '${AGENT_STATES.SYNTHESIZING}')`,
+      });
+    }
+
+    // 1. Claim synthesis quota & transition state to SYNTHESIZING
+    const claimedRun = await claimAgentRunSynthesis({ runId, userId });
+
+    // 2. Fetch all steps for synthesis input
+    // 2. Fetch all steps for synthesis input and compute collision-safe stepNumber
+    const existingSteps = await getAgentStepsByRunId({ runId, userId });
+    const stepNumber = existingSteps.length + 1;
+    const maxNonSynthStep = existingSteps
+      .filter((s) => s.type !== "synthesis")
+      .reduce((max, s) => Math.max(max, s.stepNumber || 0), 0);
+    const maxExistingStep = existingSteps.reduce(
+      (max, s) => Math.max(max, s.stepNumber || 0),
+      0
+    );
+    const stepNumber = Math.max(
+      maxNonSynthStep + (claimedRun.synthesisCallCount || 1),
+      maxExistingStep + 1
+    );
+
+    // 3. Record auditable 'synthesis' step
+    const synthStep = await createAgentStep({
+      runId,
+      stepNumber,
+      type: "synthesis",
+      input: {
+        trigger: "explicit_synthesis_request",
+      },
+      metadata: {
+        synthesisAttempt: claimedRun.synthesisCallCount,
+      },
+    });
+
+    await updateAgentStep({
+      stepId: synthStep._id,
+      runId,
+      userId,
+      updates: {
+        status: "running",
+        startedAt: new Date(),
+      },
+    });
+
+    // 4. Run pure, deterministic synthesizer
+    let finalOutput;
+    try {
+      finalOutput = synthesizeFinalRecommendation({
+        run: claimedRun,
+        steps: existingSteps,
+      });
+    } catch (synthErr) {
+      await updateAgentStep({
+        stepId: synthStep._id,
+        runId,
+        userId,
+        updates: {
+          status: "failed",
+          error: synthErr.message,
+          completedAt: new Date(),
+        },
+      });
+
+      await saveAgentRunFinalOutput({
+        runId,
+        userId,
+        finalOutput: null,
+        nextState: AGENT_STATES.FAILED,
+        error: synthErr.message,
+      });
+
+      throw synthErr;
+    }
+
+    // 5. Finalize synthesis step as completed
+    await updateAgentStep({
+      stepId: synthStep._id,
+      runId,
+      userId,
+      updates: {
+        status: "completed",
+        output: finalOutput,
+        completedAt: new Date(),
+      },
+    });
+
+    // 6. Transition run to COMPLETED and persist finalOutput
+    const completedRun = await saveAgentRunFinalOutput({
+      runId,
+      userId,
+      finalOutput,
+      nextState: AGENT_STATES.COMPLETED,
+    });
+
+    return res.status(200).json({
+      success: true,
+      finalOutput,
+      run: completedRun,
+    });
+  } catch (error) {
+    if (error instanceof AgentRunStateError) {
+      const statusCode = error.code === "BUDGET_EXCEEDED" ? 429 : 400;
+      return res.status(statusCode).json({
+        success: false,
+        code: error.code,
+        message: error.message,
+      });
+    }
+
+    if (error instanceof SynthesizerError) {
+      return res.status(error.statusCode || 400).json({
+        success: false,
+        code: error.code,
+        message: error.message,
+      });
+    }
+
+    console.error("Synthesize run output error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to synthesize final recommendation",
+    });
+  }
+};
+
+const getRunFinalOutput = async (req, res) => {
+  try {
+    const runId = req.params.id;
+    const userId = req.user.userId;
+
+    if (!ObjectId.isValid(runId)) {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_RUN_ID",
+        message: "Invalid run ID",
+      });
+    }
+
+    const run = await getAgentRunById({ id: runId, userId });
+    if (!run) {
+      return res.status(404).json({
+        success: false,
+        code: "RUN_NOT_FOUND",
+        message: "Agent run not found or access denied",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      finalOutput: run.finalOutput,
+      state: run.state,
+      runId: run._id,
+    });
+  } catch (error) {
+    console.error("Get run final output error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch final output",
+    });
+  }
+};
+
 export {
   approveRunPlan,
   createAgentRun,
@@ -408,6 +610,8 @@ export {
   generateRunPlan,
   getAgentRun,
   getNextDecision,
+  getRunFinalOutput,
   getRunPlan,
+  synthesizeRunOutput,
   updateAgentRunState,
 };

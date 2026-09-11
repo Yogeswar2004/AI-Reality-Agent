@@ -260,6 +260,144 @@ const updateAgentRunPlan = async ({ runId, userId, plan }) => {
   return serializeAgentRun(updatedRun);
 };
 
+const claimAgentRunSynthesis = async ({ runId, userId }) => {
+  if (!ObjectId.isValid(runId)) {
+    return null;
+  }
+
+  const collection = getDB().collection(AGENT_RUNS_COLLECTION);
+  const currentRun = await collection.findOne({
+    _id: new ObjectId(runId),
+    userId,
+  });
+
+  if (!currentRun) {
+    return null;
+  }
+
+  const allowedStates = new Set([
+    AGENT_STATES.EXECUTING,
+    AGENT_STATES.SYNTHESIZING,
+  ]);
+  if (!allowedStates.has(currentRun.state)) {
+    throw new AgentRunStateError(
+      `Cannot synthesize when run is in state '${currentRun.state}' (must be '${AGENT_STATES.EXECUTING}' or '${AGENT_STATES.SYNTHESIZING}')`,
+      "INVALID_STATE"
+    );
+  }
+
+  const maxSynthesis =
+    currentRun.budget?.maxSynthesisCalls ?? DEFAULT_BUDGET.maxSynthesisCalls;
+  if ((currentRun.synthesisCallCount || 0) >= maxSynthesis) {
+    throw new AgentRunStateError(
+      `Budget exceeded: synthesisCallCount (${currentRun.synthesisCallCount || 0}) reached maxSynthesisCalls (${maxSynthesis})`,
+      "BUDGET_EXCEEDED"
+    );
+  }
+
+  const updatedRun = await collection.findOneAndUpdate(
+    {
+      _id: currentRun._id,
+      userId,
+      state: currentRun.state,
+      synthesisCallCount: currentRun.synthesisCallCount,
+    },
+    {
+      $inc: { synthesisCallCount: 1 },
+      $set: {
+        state: AGENT_STATES.SYNTHESIZING,
+        updatedAt: new Date(),
+      },
+    },
+    {
+      returnDocument: "after",
+      includeResultMetadata: false,
+    }
+  );
+
+  if (!updatedRun) {
+    throw new AgentRunStateError(
+      "Agent run state or synthesis count changed before synthesis could be claimed",
+      "STATE_CONFLICT"
+    );
+  }
+
+  return serializeAgentRun(updatedRun);
+};
+
+const saveAgentRunFinalOutput = async ({
+  runId,
+  userId,
+  finalOutput,
+  nextState = AGENT_STATES.COMPLETED,
+  error = null,
+}) => {
+  if (!ObjectId.isValid(runId)) {
+    return null;
+  }
+
+  if (!isValidAgentState(nextState)) {
+    throw new AgentRunStateError("Invalid agent state", "INVALID_STATE");
+  }
+
+  const collection = getDB().collection(AGENT_RUNS_COLLECTION);
+  const currentRun = await collection.findOne({
+    _id: new ObjectId(runId),
+    userId,
+  });
+
+  if (!currentRun) {
+    return null;
+  }
+
+  if (!isValidTransition(currentRun.state, nextState)) {
+    throw new AgentRunStateError(
+      `Invalid state transition from ${currentRun.state} to ${nextState}`,
+      "INVALID_TRANSITION"
+    );
+  }
+
+  const now = new Date();
+  const updateDoc = {
+    state: nextState,
+    finalOutput: finalOutput || null,
+    error: error || null,
+    updatedAt: now,
+  };
+
+  const terminalStates = new Set([
+    AGENT_STATES.COMPLETED,
+    AGENT_STATES.FAILED,
+    AGENT_STATES.CANCELLED,
+    AGENT_STATES.QUOTA_LIMITED,
+  ]);
+  if (terminalStates.has(nextState) && !currentRun.completedAt) {
+    updateDoc.completedAt = now;
+  }
+
+  const updatedRun = await collection.findOneAndUpdate(
+    {
+      _id: currentRun._id,
+      userId,
+      state: currentRun.state,
+    },
+    { $set: updateDoc },
+    {
+      returnDocument: "after",
+      includeResultMetadata: false,
+    }
+  );
+
+  if (!updatedRun) {
+    throw new AgentRunStateError(
+      "Agent run state changed before final output could be saved",
+      "STATE_CONFLICT"
+    );
+  }
+
+  return serializeAgentRun(updatedRun);
+};
+
 // Indexes for agent_runs
 const initAgentRunIndexes = async () => {
   try {
@@ -281,8 +419,10 @@ export {
   DEFAULT_BUDGET,
   AgentRunStateError,
   claimAgentRunStep,
+  claimAgentRunSynthesis,
   createAgentRun,
   getAgentRunById,
+  saveAgentRunFinalOutput,
   updateAgentRunPlan,
   updateAgentRunState,
 };

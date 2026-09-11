@@ -7,7 +7,9 @@ import {
   generateRunPlan,
   getAgentRun,
   getNextDecision,
+  getRunFinalOutput,
   getRunPlan,
+  synthesizeRunOutput,
   updateAgentRunState,
 } from "./agentController.js";
 import stepRoutes from "./agentStepRoutes.js";
@@ -24,6 +26,10 @@ router.post("/runs/:id/plan", authenticateToken, generateRunPlan);
 router.get("/runs/:id/plan", authenticateToken, getRunPlan);
 router.get("/runs/:id/next-decision", authenticateToken, getNextDecision);
 router.post("/runs/:id/approve-plan", authenticateToken, approveRunPlan);
+
+// Synthesis endpoints
+router.post("/runs/:id/synthesize", authenticateToken, synthesizeRunOutput);
+router.get("/runs/:id/final-output", authenticateToken, getRunFinalOutput);
 
 // Nested routes for agent steps
 router.use("/runs/:runId/steps", authenticateToken, stepRoutes);
