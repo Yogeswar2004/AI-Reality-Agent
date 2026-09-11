@@ -67,6 +67,15 @@ const synthesizeFinalRecommendation = ({ run, steps = [] }) => {
   const techIdeaStep = completedToolSteps.find(
     (s) => s.input?.toolId === "tech_idea_analysis"
   );
+  const nearbyStep = completedToolSteps.find(
+    (s) => s.input?.toolId === "nearby_business_search"
+  );
+  const reviewsStep = completedToolSteps.find(
+    (s) => s.input?.toolId === "business_reviews_search"
+  );
+  const sentimentStep = completedToolSteps.find(
+    (s) => s.input?.toolId === "review_sentiment_analyzer"
+  );
 
   let feasibility = "Unknown";
   let suggestedStack = [];
@@ -94,14 +103,127 @@ const synthesizeFinalRecommendation = ({ run, steps = [] }) => {
     keyRisks.push(`Tool execution failed for '${failed.toolId}': ${failed.error}`);
   }
 
-  // Explicit disclosure of unanalyzed dimensions (no fabricated evidence)
-  const unverifiedDimensions = [
-    "Local competitor reviews",
-    "Financial unit economics",
-    "Regulatory & compliance constraints",
-  ];
+  // --- Local tool evidence extraction & cross-tool integrity verification ---
+  let hasValidNearbyEvidence = false;
+  let competitorCount = 0;
+  let competitorDensity = null;
+  let averageCompetitorRating = null;
+  let totalCompetitorReviews = 0;
 
-  // 3. Deterministic verdict and confidence calculation
+  if (nearbyStep?.output && typeof nearbyStep.output === "object") {
+    const out = nearbyStep.output;
+    if (typeof out.totalFound === "number" && Array.isArray(out.businesses)) {
+      hasValidNearbyEvidence = true;
+      competitorCount = out.totalFound;
+      if (out.density && typeof out.density === "object") {
+        competitorDensity = { ...out.density };
+      }
+      if (typeof out.averageRating === "number" && isFinite(out.averageRating)) {
+        averageCompetitorRating = out.averageRating;
+      }
+      if (typeof out.totalReviews === "number" && isFinite(out.totalReviews)) {
+        totalCompetitorReviews = out.totalReviews;
+      }
+    }
+  }
+
+  let hasValidReviewsEvidence = false;
+  let reviewedBusinessName = null;
+  let reviewsSampled = 0;
+  let integrityRisk = null;
+
+  if (reviewsStep?.output && typeof reviewsStep.output === "object") {
+    const rOut = reviewsStep.output;
+    const reviewBusinessId = typeof rOut.businessId === "string" ? rOut.businessId.trim() : "";
+    const reviewBusinessName = typeof rOut.businessName === "string" ? rOut.businessName.trim() : "";
+
+    if (hasValidNearbyEvidence) {
+      const nearbyBusinesses = nearbyStep.output.businesses;
+      const matchingCompetitor = nearbyBusinesses.find(
+        (b) => typeof b.placeId === "string" && b.placeId.trim() === reviewBusinessId
+      );
+
+      if (matchingCompetitor) {
+        hasValidReviewsEvidence = true;
+        reviewedBusinessName = reviewBusinessName || matchingCompetitor.name || null;
+        reviewsSampled =
+          typeof rOut.totalReviews === "number"
+            ? rOut.totalReviews
+            : Array.isArray(rOut.reviews)
+              ? rOut.reviews.length
+              : 0;
+      } else {
+        integrityRisk = `Evidence mismatch: Reviews target placeId '${reviewBusinessId}' does not match any discovered nearby business`;
+      }
+    } else if (!nearbyStep) {
+      hasValidReviewsEvidence = true;
+      reviewedBusinessName = reviewBusinessName || null;
+      reviewsSampled =
+        typeof rOut.totalReviews === "number"
+          ? rOut.totalReviews
+          : Array.isArray(rOut.reviews)
+            ? rOut.reviews.length
+            : 0;
+    } else {
+      integrityRisk = "Evidence mismatch: Reviews executed with missing or invalid nearby search evidence";
+    }
+  }
+
+  let hasValidSentimentEvidence = false;
+  let sentimentSummary = null;
+  let sentimentStrengths = [];
+  let sentimentWeaknesses = [];
+  let sentimentOpportunities = [];
+  let overallSentiment = null;
+  let sentimentConfidence = null;
+
+  if (sentimentStep?.output && typeof sentimentStep.output === "object") {
+    const sOut = sentimentStep.output;
+    const sentimentTargetName =
+      typeof sentimentStep.input?.businessName === "string"
+        ? sentimentStep.input.businessName.trim()
+        : null;
+
+    const isNameMatching =
+      !reviewedBusinessName ||
+      !sentimentTargetName ||
+      reviewedBusinessName.toLowerCase() === sentimentTargetName.toLowerCase();
+
+    if (isNameMatching && (!reviewsStep || hasValidReviewsEvidence)) {
+      hasValidSentimentEvidence = true;
+      if (typeof sOut.summary === "string") sentimentSummary = sOut.summary;
+      if (Array.isArray(sOut.strengths)) sentimentStrengths = [...sOut.strengths];
+      if (Array.isArray(sOut.weaknesses)) sentimentWeaknesses = [...sOut.weaknesses];
+      if (Array.isArray(sOut.opportunities)) sentimentOpportunities = [...sOut.opportunities];
+      if (typeof sOut.overallSentiment === "string") overallSentiment = sOut.overallSentiment;
+      if (typeof sOut.confidence === "string") sentimentConfidence = sOut.confidence;
+    } else if (!integrityRisk) {
+      integrityRisk = `Evidence mismatch: Sentiment analyzed business '${sentimentTargetName}' does not match reviewed business '${reviewedBusinessName}'`;
+    }
+  }
+
+  if (integrityRisk) {
+    keyRisks.push(integrityRisk);
+    partial = true;
+  }
+
+  // Dynamic unverified dimensions reflecting the actual evidence chain
+  const unverifiedDimensions = [];
+  if (!hasValidNearbyEvidence) {
+    unverifiedDimensions.push("Local competitor density");
+    unverifiedDimensions.push("Local competitor reviews");
+    unverifiedDimensions.push("Customer sentiment analysis");
+  } else if (!hasValidReviewsEvidence) {
+    unverifiedDimensions.push("Local competitor reviews");
+    unverifiedDimensions.push("Customer sentiment analysis");
+  } else if (!hasValidSentimentEvidence) {
+    unverifiedDimensions.push("Customer sentiment analysis");
+  }
+
+  unverifiedDimensions.push("Financial unit economics");
+  unverifiedDimensions.push("Regulatory & compliance constraints");
+
+  // 3. Deterministic verdict and confidence calculation (Phase 6 exact formula)
   let verdict = "INCONCLUSIVE";
   let confidenceScore = 0;
   let summary = "";
@@ -118,7 +240,7 @@ const synthesizeFinalRecommendation = ({ run, steps = [] }) => {
       "Execute planned analysis tools before requesting final recommendation."
     );
   } else {
-    // Grounded confidence score derived from actual marketFitScore (0-10)
+    // Grounded confidence score derived strictly from actual marketFitScore (0-10)
     let rawConfidence = marketFitScore !== null ? marketFitScore : 5.0;
 
     if (partial) {
@@ -141,6 +263,18 @@ const synthesizeFinalRecommendation = ({ run, steps = [] }) => {
       summary = `Investigated technology idea viability for '${goalSnippet}'. Tool analysis indicates ${feasibility.toLowerCase()} technical feasibility with a ${marketFitScore}/10 market fit score.`;
     }
 
+    // Append local evidence context to summary if verified
+    if (hasValidNearbyEvidence) {
+      summary += ` Local competitor analysis identified ${competitorCount} nearby competitor(s)`;
+      if (averageCompetitorRating !== null) {
+        summary += ` with ${averageCompetitorRating} avg rating`;
+      }
+      summary += `.`;
+      if (hasValidSentimentEvidence && sentimentSummary) {
+        summary += ` Customer sentiment: ${sentimentSummary}`;
+      }
+    }
+
     confidenceScore = Number(rawConfidence.toFixed(1));
 
     // Recommendations derived strictly from evidence
@@ -158,6 +292,16 @@ const synthesizeFinalRecommendation = ({ run, steps = [] }) => {
         `Conduct field validation and customer discovery in ${cleanLocation}.`
       );
     }
+    if (hasValidSentimentEvidence && sentimentOpportunities.length > 0) {
+      recommendations.push(
+        `Consider addressing unmet needs: ${sentimentOpportunities.join(", ")}.`
+      );
+    }
+    if (hasValidSentimentEvidence && sentimentWeaknesses.length > 0 && competitorCount > 0) {
+      recommendations.push(
+        `Competitors show weaknesses in: ${sentimentWeaknesses.join(", ")}. Differentiate here.`
+      );
+    }
     if (partial) {
       recommendations.push(
         "Re-run failed or unexecuted tool steps to complete unverified analysis dimensions."
@@ -165,12 +309,21 @@ const synthesizeFinalRecommendation = ({ run, steps = [] }) => {
     }
   }
 
-  const marketFitAnalysis =
+  let marketFitAnalysis =
     marketFitScore !== null
-      ? `Derived strictly from tech_idea_analysis tool findings (${marketFitScore}/10). Live consumer reviews and local competitor density were not evaluated.`
+      ? `Derived strictly from tech_idea_analysis tool findings (${marketFitScore}/10).`
       : "Market fit score not evaluated.";
 
-  return {
+  if (hasValidNearbyEvidence) {
+    marketFitAnalysis += ` Local competitor density: ${competitorCount} discovered within search radius.`;
+  } else {
+    marketFitAnalysis += ` Live consumer reviews and local competitor density were not evaluated.`;
+  }
+
+  const hasAnyLocalEvidence =
+    hasValidNearbyEvidence || hasValidReviewsEvidence || hasValidSentimentEvidence;
+
+  const finalOutput = {
     summary,
     verdict,
     confidenceScore,
@@ -192,6 +345,37 @@ const synthesizeFinalRecommendation = ({ run, steps = [] }) => {
     },
     synthesizedAt: new Date(),
   };
+
+  if (hasAnyLocalEvidence) {
+    finalOutput.localEvidence = {
+      ...(hasValidNearbyEvidence
+        ? {
+            competitorCount,
+            competitorDensity,
+            averageCompetitorRating,
+            totalCompetitorReviews,
+          }
+        : {}),
+      ...(hasValidReviewsEvidence
+        ? {
+            reviewedBusinessName,
+            reviewsSampled,
+          }
+        : {}),
+      ...(hasValidSentimentEvidence
+        ? {
+            sentimentSummary,
+            sentimentStrengths,
+            sentimentWeaknesses,
+            sentimentOpportunities,
+            overallSentiment,
+            sentimentConfidence,
+          }
+        : {}),
+    };
+  }
+
+  return finalOutput;
 };
 
 export { SynthesizerError, synthesizeFinalRecommendation };
