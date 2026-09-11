@@ -6,20 +6,46 @@ import { TOOL_IDS, TOOL_ACCESS, TOOL_RISK, DEFAULT_QUOTA_COST, MOCK_ENABLED } fr
 class ToolRegistry {
   constructor() {
     this._tools = new Map();
+    this._adapters = new Map();
   }
 
   /**
    * Register a tool definition.
    * @param {Object} definition - The tool definition.
+   * @param {Object|null} [adapter=null] - Optional tool adapter instance.
    * @throws {Error} If definition is invalid or ID already exists.
    */
-  registerTool(definition) {
+  registerTool(definition, adapter = null) {
     this._validateDefinition(definition);
     const { id } = definition;
     if (this._tools.has(id)) {
       throw new Error(`Tool with ID '${id}' already registered`);
     }
     this._tools.set(id, definition);
+    if (adapter) {
+      this._adapters.set(id, adapter);
+    }
+  }
+
+  /**
+   * Register an adapter for an already registered tool ID.
+   * @param {string} id - The tool ID.
+   * @param {Object} adapter - The adapter instance.
+   */
+  registerAdapter(id, adapter) {
+    if (!this._tools.has(id)) {
+      throw new Error(`Cannot register adapter for unknown tool ID '${id}'`);
+    }
+    this._adapters.set(id, adapter);
+  }
+
+  /**
+   * Get a tool adapter by ID.
+   * @param {string} id - The tool ID.
+   * @returns {Object|null} The tool adapter or null if not found.
+   */
+  getAdapter(id) {
+    return this._adapters.get(id) || null;
   }
 
   /**

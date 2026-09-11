@@ -5,6 +5,7 @@ import {
   updateAgentRunState as updateRunState,
 } from "./agentRun.js";
 import { getValidNextStates } from "./agentState.js";
+import { ToolExecutorError, executeToolStep } from "./toolExecutor.js";
 
 const createAgentRun = async (req, res) => {
   try {
@@ -121,4 +122,43 @@ const updateAgentRunState = async (req, res) => {
   }
 };
 
-export { createAgentRun, getAgentRun, updateAgentRunState };
+const executeTool = async (req, res) => {
+  try {
+    const runId = req.params.id;
+    const userId = req.user.userId;
+    const { toolId, input = {} } = req.body;
+
+    if (!toolId || typeof toolId !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "toolId is required",
+      });
+    }
+
+    const result = await executeToolStep({
+      runId,
+      userId,
+      toolId: toolId.trim(),
+      input,
+    });
+
+    return res.status(200).json(result);
+  } catch (error) {
+    if (error instanceof ToolExecutorError) {
+      return res.status(error.statusCode || 400).json({
+        success: false,
+        code: error.code,
+        message: error.message,
+      });
+    }
+
+    console.error("Execute tool error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to execute tool",
+    });
+  }
+};
+
+export { createAgentRun, executeTool, getAgentRun, updateAgentRunState };

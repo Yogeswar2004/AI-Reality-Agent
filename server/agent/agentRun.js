@@ -156,6 +156,80 @@ const updateAgentRunState = async ({
   return serializeAgentRun(updatedRun);
 };
 
+const claimAgentRunStep = async ({ runId, userId, isExternal = false }) => {
+  if (!ObjectId.isValid(runId)) {
+    return null;
+  }
+
+  const collection = getDB().collection(AGENT_RUNS_COLLECTION);
+  const currentRun = await collection.findOne({
+    _id: new ObjectId(runId),
+    userId,
+  });
+
+  if (!currentRun) {
+    return null;
+  }
+
+  if (currentRun.state !== AGENT_STATES.EXECUTING) {
+    throw new AgentRunStateError(
+      `Cannot execute tools when run is in state '${currentRun.state}' (must be '${AGENT_STATES.EXECUTING}')`,
+      "INVALID_STATE"
+    );
+  }
+
+  const maxSteps = currentRun.budget?.maxSteps ?? DEFAULT_BUDGET.maxSteps;
+  if ((currentRun.stepCount || 0) >= maxSteps) {
+    throw new AgentRunStateError(
+      `Budget exceeded: stepCount (${currentRun.stepCount || 0}) reached maxSteps (${maxSteps})`,
+      "BUDGET_EXCEEDED"
+    );
+  }
+
+  if (isExternal) {
+    const maxExternal = currentRun.budget?.maxExternalCalls ?? DEFAULT_BUDGET.maxExternalCalls;
+    if ((currentRun.externalCallCount || 0) >= maxExternal) {
+      throw new AgentRunStateError(
+        `Budget exceeded: externalCallCount (${currentRun.externalCallCount || 0}) reached maxExternalCalls (${maxExternal})`,
+        "BUDGET_EXCEEDED"
+      );
+    }
+  }
+
+  const updateDoc = {
+    $inc: {
+      stepCount: 1,
+      ...(isExternal ? { externalCallCount: 1 } : {}),
+    },
+    $set: {
+      updatedAt: new Date(),
+    },
+  };
+
+  const updatedRun = await collection.findOneAndUpdate(
+    {
+      _id: currentRun._id,
+      userId,
+      state: AGENT_STATES.EXECUTING,
+      stepCount: currentRun.stepCount,
+    },
+    updateDoc,
+    {
+      returnDocument: "after",
+      includeResultMetadata: false,
+    }
+  );
+
+  if (!updatedRun) {
+    throw new AgentRunStateError(
+      "Agent run step count or state changed before step could be claimed",
+      "STATE_CONFLICT"
+    );
+  }
+
+  return serializeAgentRun(updatedRun);
+};
+
 // Indexes for agent_runs
 const initAgentRunIndexes = async () => {
   try {
@@ -176,6 +250,7 @@ export {
   AGENT_RUNS_COLLECTION,
   DEFAULT_BUDGET,
   AgentRunStateError,
+  claimAgentRunStep,
   createAgentRun,
   getAgentRunById,
   updateAgentRunState,
