@@ -5,12 +5,30 @@ import registry from "./toolRegistry.js";
 import techIdeaAnalysisAdapter, {
   techIdeaAnalysisDefinition,
 } from "./tools/techIdeaAnalysisAdapter.js";
+import nearbyBusinessSearchAdapter, {
+  nearbyBusinessSearchDefinition,
+} from "./tools/nearbyBusinessSearchAdapter.js";
+import businessReviewsAdapter, {
+  businessReviewsDefinition,
+} from "./tools/businessReviewsAdapter.js";
+import reviewSentimentAdapter, {
+  reviewSentimentDefinition,
+} from "./tools/reviewSentimentAdapter.js";
 
-// Ensure default prototype tool is registered in the registry singleton
-if (!registry.getTool(techIdeaAnalysisDefinition.id)) {
-  registry.registerTool(techIdeaAnalysisDefinition, techIdeaAnalysisAdapter);
-} else if (!registry.getAdapter(techIdeaAnalysisDefinition.id)) {
-  registry.registerAdapter(techIdeaAnalysisDefinition.id, techIdeaAnalysisAdapter);
+// Ensure default Phase 3 and Phase 7A tools are registered in the registry singleton
+const DEFAULT_TOOLS = [
+  { def: techIdeaAnalysisDefinition, adapter: techIdeaAnalysisAdapter },
+  { def: nearbyBusinessSearchDefinition, adapter: nearbyBusinessSearchAdapter },
+  { def: businessReviewsDefinition, adapter: businessReviewsAdapter },
+  { def: reviewSentimentDefinition, adapter: reviewSentimentAdapter },
+];
+
+for (const { def, adapter } of DEFAULT_TOOLS) {
+  if (!registry.getTool(def.id)) {
+    registry.registerTool(def, adapter);
+  } else if (!registry.getAdapter(def.id)) {
+    registry.registerAdapter(def.id, adapter);
+  }
 }
 
 class ToolExecutorError extends Error {

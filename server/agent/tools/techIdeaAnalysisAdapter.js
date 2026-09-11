@@ -15,7 +15,7 @@ class TechIdeaAnalysisAdapter extends BaseToolAdapter {
     if (definition.id !== TOOL_IDS.TECH_IDEA_ANALYSIS) {
       throw new Error("Incorrect tool ID for TechIdeaAnalysisAdapter");
     }
-  }
+  };
 
   /**
    * Validate input for tech_idea_analysis.

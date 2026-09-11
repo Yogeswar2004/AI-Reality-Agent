@@ -5,7 +5,9 @@
 // Tool IDs (stable strings)
 export const TOOL_IDS = Object.freeze({
   TECH_IDEA_ANALYSIS: "tech_idea_analysis",
-  // Future tools can be added here
+  NEARBY_BUSINESS_SEARCH: "nearby_business_search",
+  BUSINESS_REVIEWS_SEARCH: "business_reviews_search",
+  REVIEW_SENTIMENT_ANALYZER: "review_sentiment_analyzer",
 });
 
 // Access types
@@ -24,5 +26,5 @@ export const TOOL_RISK = Object.freeze({
 // Default quota cost units (abstract)
 export const DEFAULT_QUOTA_COST = 1;
 
-// Mock mode flag for Phase 3 (all tools are mock in this phase)
+// Metadata capability flag indicating tool supports mock execution
 export const MOCK_ENABLED = true;

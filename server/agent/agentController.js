@@ -444,10 +444,8 @@ const synthesizeRunOutput = async (req, res) => {
     // 1. Claim synthesis quota & transition state to SYNTHESIZING
     const claimedRun = await claimAgentRunSynthesis({ runId, userId });
 
-    // 2. Fetch all steps for synthesis input
     // 2. Fetch all steps for synthesis input and compute collision-safe stepNumber
     const existingSteps = await getAgentStepsByRunId({ runId, userId });
-    const stepNumber = existingSteps.length + 1;
     const maxNonSynthStep = existingSteps
       .filter((s) => s.type !== "synthesis")
       .reduce((max, s) => Math.max(max, s.stepNumber || 0), 0);
