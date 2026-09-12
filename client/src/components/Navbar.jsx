@@ -46,6 +46,13 @@ function Navbar() {
               </Link>
 
               <Link
+                to="/agent"
+                style={styles.navLink}
+              >
+                AI Agent
+              </Link>
+
+              <Link
                 to="/my-ideas"
                 style={styles.navLink}
               >
