@@ -83,6 +83,8 @@ const updateAgentRunState = async ({
   runId,
   userId,
   nextState,
+  cancellationReason = null,
+  error = null,
 }) => {
   if (!isValidAgentState(nextState)) {
     throw new AgentRunStateError(
@@ -112,14 +114,23 @@ const updateAgentRunState = async ({
     );
   }
 
+  const now = new Date();
   const updateDoc = {
     state: nextState,
-    updatedAt: new Date(),
+    updatedAt: now,
   };
+
+  if (cancellationReason !== null && cancellationReason !== undefined) {
+    updateDoc.cancellationReason = typeof cancellationReason === "string" ? cancellationReason.trim() : null;
+  }
+
+  if (error !== null && error !== undefined) {
+    updateDoc.error = typeof error === "string" ? error.trim() : null;
+  }
 
   // Set startedAt when entering EXECUTING (only if not already set)
   if (nextState === AGENT_STATES.EXECUTING && !currentRun.startedAt) {
-    updateDoc.startedAt = new Date();
+    updateDoc.startedAt = now;
   }
 
   // Set completedAt when entering a terminal state (only if not already set)
@@ -130,7 +141,7 @@ const updateAgentRunState = async ({
     AGENT_STATES.QUOTA_LIMITED,
   ]);
   if (terminalStates.has(nextState) && !currentRun.completedAt) {
-    updateDoc.completedAt = new Date();
+    updateDoc.completedAt = now;
   }
 
   const updatedRun = await collection.findOneAndUpdate(
@@ -154,6 +165,16 @@ const updateAgentRunState = async ({
   }
 
   return serializeAgentRun(updatedRun);
+};
+
+const cancelAgentRun = async ({ runId, userId, reason = "Cancelled by user" }) => {
+  const cleanReason = typeof reason === "string" && reason.trim() ? reason.trim() : "Cancelled by user";
+  return updateAgentRunState({
+    runId,
+    userId,
+    nextState: AGENT_STATES.CANCELLED,
+    cancellationReason: cleanReason,
+  });
 };
 
 const claimAgentRunStep = async ({ runId, userId, isExternal = false }) => {
@@ -425,4 +446,5 @@ export {
   saveAgentRunFinalOutput,
   updateAgentRunPlan,
   updateAgentRunState,
+  cancelAgentRun,
 };

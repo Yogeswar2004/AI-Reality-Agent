@@ -2,10 +2,12 @@ import express from "express";
 import { authenticateToken } from "../middleware/authMiddleware.js";
 import {
   approveRunPlan,
+  cancelAgentRun,
   createAgentRun,
   executeTool,
   generateRunPlan,
   getAgentRun,
+  getAgentRunStatus,
   getNextDecision,
   getRunFinalOutput,
   getRunPlan,
@@ -18,7 +20,9 @@ const router = express.Router();
 
 router.post("/runs", authenticateToken, createAgentRun);
 router.get("/runs/:id", authenticateToken, getAgentRun);
+router.get("/runs/:id/status", authenticateToken, getAgentRunStatus);
 router.patch("/runs/:id/state", authenticateToken, updateAgentRunState);
+router.post("/runs/:id/cancel", authenticateToken, cancelAgentRun);
 router.post("/runs/:id/execute-tool", authenticateToken, executeTool);
 
 // Planner advisory and approval endpoints

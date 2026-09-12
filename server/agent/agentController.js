@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import {
   AgentRunStateError,
+  cancelAgentRun as cancelRunHelper,
   claimAgentRunSynthesis,
   createAgentRun as createRun,
   getAgentRunById,
@@ -109,6 +110,8 @@ const updateAgentRunState = async (req, res) => {
       runId: req.params.id,
       userId: req.user.userId,
       nextState,
+      cancellationReason: req.body.cancellationReason,
+      error: req.body.error,
     });
 
     if (!run) {
@@ -141,9 +144,9 @@ const updateAgentRunState = async (req, res) => {
 };
 
 const executeTool = async (req, res) => {
+  const runId = req.params.id;
+  const userId = req.user.userId;
   try {
-    const runId = req.params.id;
-    const userId = req.user.userId;
     const { toolId, input = {} } = req.body;
 
     if (!toolId || typeof toolId !== "string") {
@@ -160,9 +163,33 @@ const executeTool = async (req, res) => {
       input,
     });
 
-    return res.status(200).json(result);
+    let nextDecision = null;
+    try {
+      nextDecision = await evaluateNextStep({ runId, userId });
+    } catch (evalErr) {
+      console.warn(
+        "Could not evaluate next decision after tool execution:",
+        evalErr?.message
+      );
+    }
+
+    return res.status(200).json({
+      ...result,
+      nextDecision,
+    });
   } catch (error) {
     if (error instanceof ToolExecutorError) {
+      if (error.code === "BUDGET_EXCEEDED") {
+        try {
+          await updateRunState({
+            runId,
+            userId,
+            nextState: AGENT_STATES.QUOTA_LIMITED,
+          });
+        } catch (stateErr) {
+          // Ignore if transition not permitted or already in terminal state
+        }
+      }
       return res.status(error.statusCode || 400).json({
         success: false,
         code: error.code,
@@ -385,9 +412,20 @@ const approveRunPlan = async (req, res) => {
       nextState: AGENT_STATES.EXECUTING,
     });
 
+    let nextDecision = null;
+    try {
+      nextDecision = await evaluateNextStep({ runId, userId });
+    } catch (evalErr) {
+      console.warn(
+        "Could not evaluate next decision after plan approval:",
+        evalErr?.message
+      );
+    }
+
     return res.status(200).json({
       success: true,
       run: updatedRun,
+      nextDecision,
     });
   } catch (error) {
     if (error instanceof AgentRunStateError) {
@@ -601,12 +639,133 @@ const getRunFinalOutput = async (req, res) => {
   }
 };
 
+const cancelAgentRun = async (req, res) => {
+  try {
+    const runId = req.params.id;
+    const userId = req.user.userId;
+    const reason =
+      typeof req.body?.reason === "string" ? req.body.reason.trim() : undefined;
+
+    if (!ObjectId.isValid(runId)) {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_RUN_ID",
+        message: "Invalid run ID",
+      });
+    }
+
+    const run = await cancelRunHelper({
+      runId,
+      userId,
+      reason,
+    });
+
+    if (!run) {
+      return res.status(404).json({
+        success: false,
+        code: "RUN_NOT_FOUND",
+        message: "Agent run not found or access denied",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      run,
+      validNextStates: getValidNextStates(run.state),
+    });
+  } catch (error) {
+    if (error instanceof AgentRunStateError) {
+      return res.status(400).json({
+        success: false,
+        code: error.code,
+        message: error.message,
+      });
+    }
+
+    console.error("Cancel agent run error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to cancel agent run",
+    });
+  }
+};
+
+const getAgentRunStatus = async (req, res) => {
+  try {
+    const runId = req.params.id;
+    const userId = req.user.userId;
+
+    if (!ObjectId.isValid(runId)) {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_RUN_ID",
+        message: "Invalid run ID",
+      });
+    }
+
+    const run = await getAgentRunById({ id: runId, userId });
+    if (!run) {
+      return res.status(404).json({
+        success: false,
+        code: "RUN_NOT_FOUND",
+        message: "Agent run not found or access denied",
+      });
+    }
+
+    const steps = await getAgentStepsByRunId({ runId, userId });
+
+    let nextDecision = null;
+    if (run.plan) {
+      try {
+        nextDecision = await evaluateNextStep({ runId, userId });
+      } catch (evalErr) {
+        console.warn(
+          "Could not evaluate next decision for run status:",
+          evalErr?.message
+        );
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      runId: run._id,
+      state: run.state,
+      stepCount: run.stepCount,
+      externalCallCount: run.externalCallCount,
+      budget: run.budget,
+      plan: run.plan,
+      hasFinalOutput: Boolean(run.finalOutput),
+      stepSummary: {
+        total: steps.length,
+        completed: steps.filter((s) => s.status === "completed").length,
+        failed: steps.filter((s) => s.status === "failed").length,
+        running: steps.filter((s) => s.status === "running").length,
+      },
+      nextDecision,
+      validNextStates: getValidNextStates(run.state),
+      completedAt: run.completedAt,
+      cancellationReason: run.cancellationReason,
+      error: run.error,
+    });
+  } catch (error) {
+    console.error("Get agent run status error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch agent run status",
+    });
+  }
+};
+
 export {
   approveRunPlan,
+  cancelAgentRun,
   createAgentRun,
   executeTool,
   generateRunPlan,
   getAgentRun,
+  getAgentRunStatus,
   getNextDecision,
   getRunFinalOutput,
   getRunPlan,
