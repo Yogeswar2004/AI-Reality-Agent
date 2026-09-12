@@ -64,10 +64,12 @@ class TechIdeaAnalysisAdapter extends BaseToolAdapter {
   _execute(input) {
     // We ignore the input for the fixture in Phase 3 (deterministic default).
     // In a real implementation, we might use the input to vary the output.
+    const fixture = TOOL_FIXTURES.tech_idea_analysis;
     return {
-      ...TOOL_FIXTURES.tech_idea_analysis,
-      suggestedStack: [...TOOL_FIXTURES.tech_idea_analysis.suggestedStack],
-      risks: [...TOOL_FIXTURES.tech_idea_analysis.risks],
+      feasibility: fixture.feasibility,
+      suggestedStack: [...fixture.suggestedStack],
+      marketFitScore: fixture.marketFitScore,
+      risks: [...fixture.risks],
     };
   }
 

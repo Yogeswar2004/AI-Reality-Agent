@@ -31,7 +31,7 @@ class BusinessReviewsAdapter extends BaseToolAdapter {
       throw new Error("Input must be an object");
     }
 
-    const { businessId, businessName, limit } = input;
+    const { businessId, businessName, limit, region } = input;
 
     if (typeof businessId !== "string" || !businessId.trim()) {
       throw new Error("Input must have a non-empty string 'businessId'");
@@ -55,7 +55,16 @@ class BusinessReviewsAdapter extends BaseToolAdapter {
       }
     }
 
-    const allowedKeys = ["businessId", "businessName", "limit"];
+    if (region !== undefined && region !== null) {
+      if (typeof region !== "string" || !region.trim()) {
+        throw new Error("'region' must be a non-empty string if provided");
+      }
+      if (region.trim().length > 10) {
+        throw new Error("'region' must not exceed 10 characters");
+      }
+    }
+
+    const allowedKeys = ["businessId", "businessName", "limit", "region"];
     const extraKeys = Object.keys(input).filter((k) => !allowedKeys.includes(k));
     if (extraKeys.length > 0) {
       throw new Error(`Input contains unexpected property(ies): ${extraKeys.join(", ")}`);
@@ -79,9 +88,11 @@ class BusinessReviewsAdapter extends BaseToolAdapter {
     }
 
     const limit = typeof input.limit === "number" ? input.limit : 5;
+    const region = typeof input.region === "string" && input.region.trim() ? input.region.trim() : null;
     const rawReviews = await getBusinessReviews({
       businessId: input.businessId.trim(),
       limit,
+      region,
     });
 
     const reviews = (Array.isArray(rawReviews) ? rawReviews : []).map((r) => ({
@@ -151,6 +162,7 @@ const definition = {
     properties: {
       businessId: { type: "string", minLength: 1, maxLength: 120 },
       businessName: { type: "string", maxLength: 100 },
+      region: { type: "string", maxLength: 10 },
       limit: { type: "integer", minimum: 1, maximum: 20 },
     },
     required: ["businessId"],

@@ -9,10 +9,6 @@ export const TOOL_FIXTURES = {
     suggestedStack: ["React", "Node.js", "PostgreSQL"],
     marketFitScore: 8.5,
     risks: ["Competition", "Technical complexity"],
-    targetUsers: ["Early adopters", "Small teams"],
-    monetizationStrategies: ["Subscription tiers", "Usage-based plan"],
-    mvpFeatures: ["Core workflow", "User authentication", "Basic dashboard"],
-    recommendation: "Build MVP focusing on core workflow and test with target users.",
   },
   nearby_business_search: {
     totalFound: 3,

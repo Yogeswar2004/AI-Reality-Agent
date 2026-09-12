@@ -196,6 +196,8 @@ raw: {
     placeId:
     business.place_id ||
     business.placeId ||
+    business.business_id ||
+    business.businessId ||
     null,
 
     latitude:

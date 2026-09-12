@@ -65,7 +65,8 @@ const getMockReviews = ({ businessId, limit }) => {
  */
 const getBusinessReviews = async ({
   businessId,
-  limit = 5,  
+  limit = 5,
+  region = null,
 }) => {
   try {
     // ----------------------------------------
@@ -126,7 +127,9 @@ const getBusinessReviews = async ({
 
           sort_by: "most_relevant",
 
-          region: "in",
+          ...(region && typeof region === "string" && region.trim()
+            ? { region: region.trim().toLowerCase() }
+            : {}),
 
           language: "en",
         },
