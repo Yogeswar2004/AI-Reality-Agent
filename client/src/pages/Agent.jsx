@@ -265,12 +265,15 @@ function Agent() {
   // Helper: Verdict badge color scheme
   const getVerdictStyle = (verdict) => {
     switch (verdict) {
+      case "VIABLE":
       case "STRONG_VIABILITY":
-        return { bg: "rgba(34, 197, 94, 0.2)", color: "#86EFAC", border: "rgba(34, 197, 94, 0.4)", text: "Strong Viability" };
+        return { bg: "rgba(34, 197, 94, 0.2)", color: "#86EFAC", border: "rgba(34, 197, 94, 0.4)", text: "Viable" };
+      case "NEEDS_REFINEMENT":
       case "MODERATE_VIABILITY":
-        return { bg: "rgba(124, 58, 237, 0.2)", color: "#C4B5FD", border: "rgba(139, 92, 246, 0.4)", text: "Moderate Viability" };
+        return { bg: "rgba(124, 58, 237, 0.2)", color: "#C4B5FD", border: "rgba(139, 92, 246, 0.4)", text: "Needs Refinement" };
       case "HIGH_RISK":
         return { bg: "rgba(239, 68, 68, 0.2)", color: "#FCA5A5", border: "rgba(239, 68, 68, 0.4)", text: "High Risk" };
+      case "INCONCLUSIVE":
       default:
         return { bg: "rgba(245, 158, 11, 0.2)", color: "#FCD34D", border: "rgba(245, 158, 11, 0.4)", text: "Inconclusive" };
     }
@@ -908,7 +911,7 @@ function Agent() {
                             {out.localEvidence.competitorCount ?? 0}
                           </span>
                           <span style={styles.subText}>
-                            Density: {out.localEvidence.competitorDensity || "N/A"}
+                            Density: {out.localEvidence.competitorDensity?.densityRating || (typeof out.localEvidence.competitorDensity === "string" ? out.localEvidence.competitorDensity : "N/A")}
                           </span>
                         </div>
 
