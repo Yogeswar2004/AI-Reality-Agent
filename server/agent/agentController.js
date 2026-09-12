@@ -20,6 +20,7 @@ import {
   PlannerError,
   evaluateNextStep,
   generatePlan,
+  generatePlanWithFallback,
 } from "./planner.js";
 import {
   SynthesizerError,
@@ -253,10 +254,11 @@ const generateRunPlan = async (req, res) => {
       });
     }
 
-    // 2. Call advisory planner to generate plan object
-    const plan = generatePlan({
+    // 2. Call advisory planner to generate plan object (LLM-driven with deterministic fallback)
+    const plan = await generatePlanWithFallback({
       goal: run.goal,
       location: run.location,
+      budget: run.budget,
     });
 
     // 3. Persist plan on run document

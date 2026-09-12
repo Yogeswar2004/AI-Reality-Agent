@@ -6,6 +6,7 @@ import { AGENT_STATES } from "./agentState.js";
 import registry from "./toolRegistry.js";
 import { TOOL_IDS } from "./toolConstants.js";
 import { techIdeaAnalysisDefinition } from "./tools/techIdeaAnalysisAdapter.js";
+import { generateLLMPlan, LLMPlannerError } from "./llmPlanner.js";
 
 class PlannerError extends Error {
   constructor(message, code, statusCode = 400) {
@@ -603,4 +604,56 @@ const evaluateNextStep = async ({ runId, userId }) => {
   };
 };
 
-export { PlannerError, evaluateNextStep, generatePlan };
+/**
+ * Generate an investigation plan using the LLM planner with automatic fallback
+ * to the deterministic planner if LLM planning fails or is unavailable.
+ *
+ * @param {Object} params
+ * @param {string} params.goal - Venture goal description.
+ * @param {string|null} [params.location=null] - Optional location string.
+ * @param {Object|null} [params.budget=null] - Optional budget object { maxSteps, ... }.
+ * @param {Array<Object>|null} [params.availableTools=null] - Optional tool list.
+ * @param {Object|null} [params.providerClient=null] - Optional Gemini client.
+ * @param {string|null} [params.model=null] - Optional model identifier.
+ * @returns {Promise<Object>} Structured plan object.
+ */
+const generatePlanWithFallback = async ({
+  goal,
+  location = null,
+  budget = null,
+  availableTools = null,
+  providerClient = null,
+  model = null,
+}) => {
+  try {
+    const plan = await generateLLMPlan({
+      goal,
+      location,
+      budget,
+      availableTools,
+      providerClient,
+      model,
+    });
+    return plan;
+  } catch (err) {
+    console.warn(
+      `[LLM Planner] Failed to generate plan via LLM (${err.code || err.name}: ${err.message}). Falling back to deterministic planner.`
+    );
+    const deterministicPlan = generatePlan({ goal, location });
+    return {
+      ...deterministicPlan,
+      source: "deterministic_fallback",
+      fallbackReason: err.message || "LLM planner unavailable",
+      goalUnderstanding: deterministicPlan.summary,
+      clarificationsNeeded: [],
+    };
+  }
+};
+
+export {
+  PlannerError,
+  LLMPlannerError,
+  evaluateNextStep,
+  generatePlan,
+  generatePlanWithFallback,
+};
