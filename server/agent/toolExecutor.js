@@ -2,6 +2,7 @@ import { ObjectId } from "mongodb";
 import { claimAgentRunStep, AgentRunStateError } from "./agentRun.js";
 import { createAgentStep, updateAgentStep } from "./agentStep.js";
 import registry from "./toolRegistry.js";
+import { extractAndPersistStepEvidence } from "./evidenceExtractor.js";
 import techIdeaAnalysisAdapter, {
   techIdeaAnalysisDefinition,
 } from "./tools/techIdeaAnalysisAdapter.js";
@@ -163,6 +164,23 @@ const executeToolStep = async ({ runId, userId, toolId, input = {} }) => {
     });
   }
 
+  // 5. Extract and persist evidence if step completed successfully
+  let evidence = null;
+  let evidenceError = null;
+
+  if (!result.error && finalizedStep) {
+    try {
+      evidence = await extractAndPersistStepEvidence({
+        step: finalizedStep,
+        runId,
+        userId,
+      });
+    } catch (err) {
+      console.warn("Evidence extraction/persistence failed:", err?.message);
+      evidenceError = err?.message || "Failed to persist evidence";
+    }
+  }
+
   return {
     success: !result.error,
     step: finalizedStep || runningStep,
@@ -173,6 +191,8 @@ const executeToolStep = async ({ runId, userId, toolId, input = {} }) => {
       externalCallCount: updatedRun.externalCallCount,
       budget: updatedRun.budget,
     },
+    evidence: evidence || null,
+    ...(evidenceError ? { evidenceError } : {}),
   };
 };
 

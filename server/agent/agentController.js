@@ -25,6 +25,10 @@ import {
   SynthesizerError,
   synthesizeFinalRecommendation,
 } from "./synthesizer.js";
+import {
+  VALID_EVIDENCE_TYPES,
+  getAgentEvidenceByRunId,
+} from "./agentEvidence.js";
 
 const createAgentRun = async (req, res) => {
   try {
@@ -758,6 +762,58 @@ const getAgentRunStatus = async (req, res) => {
   }
 };
 
+const getRunEvidence = async (req, res) => {
+  try {
+    const runId = req.params.id;
+    const userId = req.user.userId;
+
+    if (!ObjectId.isValid(runId)) {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_RUN_ID",
+        message: "Invalid run ID",
+      });
+    }
+
+    const run = await getAgentRunById({ id: runId, userId });
+    if (!run) {
+      return res.status(404).json({
+        success: false,
+        code: "RUN_NOT_FOUND",
+        message: "Agent run not found or access denied",
+      });
+    }
+
+    const evidenceType = req.query?.evidenceType || null;
+    if (evidenceType && !VALID_EVIDENCE_TYPES.includes(evidenceType)) {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_EVIDENCE_TYPE",
+        message: `Invalid evidence type: ${evidenceType}`,
+      });
+    }
+
+    const evidence = await getAgentEvidenceByRunId({
+      runId,
+      userId,
+      evidenceType,
+    });
+
+    return res.status(200).json({
+      success: true,
+      runId: run._id,
+      evidence,
+    });
+  } catch (error) {
+    console.error("Get run evidence error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch run evidence",
+    });
+  }
+};
+
 export {
   approveRunPlan,
   cancelAgentRun,
@@ -767,6 +823,7 @@ export {
   getAgentRun,
   getAgentRunStatus,
   getNextDecision,
+  getRunEvidence,
   getRunFinalOutput,
   getRunPlan,
   synthesizeRunOutput,

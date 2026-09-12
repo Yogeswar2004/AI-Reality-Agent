@@ -9,6 +9,7 @@ import {
   getAgentRun,
   getAgentRunStatus,
   getNextDecision,
+  getRunEvidence,
   getRunFinalOutput,
   getRunPlan,
   synthesizeRunOutput,
@@ -24,6 +25,7 @@ router.get("/runs/:id/status", authenticateToken, getAgentRunStatus);
 router.patch("/runs/:id/state", authenticateToken, updateAgentRunState);
 router.post("/runs/:id/cancel", authenticateToken, cancelAgentRun);
 router.post("/runs/:id/execute-tool", authenticateToken, executeTool);
+router.get("/runs/:id/evidence", authenticateToken, getRunEvidence);
 
 // Planner advisory and approval endpoints
 router.post("/runs/:id/plan", authenticateToken, generateRunPlan);
