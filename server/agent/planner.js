@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import { getAgentRunById } from "./agentRun.js";
 import { getAgentStepsByRunId } from "./agentStep.js";
+import { getAgentEvidenceByRunId } from "./agentEvidence.js";
 import { AGENT_STATES } from "./agentState.js";
 import registry from "./toolRegistry.js";
 import { TOOL_IDS } from "./toolConstants.js";
@@ -361,6 +362,8 @@ const evaluateNextStep = async ({ runId, userId }) => {
     }
 
     const steps = await getAgentStepsByRunId({ runId, userId });
+    const evidenceList = await getAgentEvidenceByRunId({ runId, userId });
+
     const toolSteps = steps.filter((s) => s.type === "tool_execution");
     const failedSteps = toolSteps.filter((s) => s.status === "failed");
     const completedSteps = toolSteps.filter((s) => s.status === "completed");
@@ -373,9 +376,10 @@ const evaluateNextStep = async ({ runId, userId }) => {
       };
     }
 
-    const executedToolIds = new Set(
-      completedSteps.map((s) => s.input?.toolId)
-    );
+    const executedToolIds = new Set([
+      ...completedSteps.map((s) => s.input?.toolId),
+      ...evidenceList.map((e) => e.toolId),
+    ]);
     const nextPlannedStep = run.plan.steps.find(
       (s) => !executedToolIds.has(s.toolId)
     );
@@ -422,11 +426,16 @@ const evaluateNextStep = async ({ runId, userId }) => {
     }
 
     if (nextPlannedStep.toolId === TOOL_IDS.BUSINESS_REVIEWS_SEARCH) {
+      const competitorEvidence = evidenceList.find(
+        (e) =>
+          e.evidenceType === "competitor_discovery" ||
+          e.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH
+      );
       const searchStep = completedSteps.find(
         (s) => s.input?.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH
       );
 
-      if (!searchStep || !searchStep.output) {
+      if (!competitorEvidence && (!searchStep || !searchStep.output)) {
         return {
           action: "FAIL",
           reason:
@@ -434,7 +443,9 @@ const evaluateNextStep = async ({ runId, userId }) => {
         };
       }
 
-      const businesses = searchStep.output.businesses;
+      const businesses =
+        competitorEvidence?.data?.businesses ?? searchStep?.output?.businesses;
+
       if (!Array.isArray(businesses) || businesses.length === 0) {
         return {
           action: "TRANSITION_SYNTHESIZING",
@@ -445,7 +456,7 @@ const evaluateNextStep = async ({ runId, userId }) => {
 
       const primaryCompetitor = businesses[0];
       const businessId =
-        typeof primaryCompetitor.placeId === "string"
+        typeof primaryCompetitor?.placeId === "string"
           ? primaryCompetitor.placeId.trim()
           : "";
 
@@ -457,7 +468,8 @@ const evaluateNextStep = async ({ runId, userId }) => {
       }
 
       const businessName =
-        typeof primaryCompetitor.name === "string" && primaryCompetitor.name.trim()
+        typeof primaryCompetitor?.name === "string" &&
+        primaryCompetitor.name.trim()
           ? primaryCompetitor.name.trim()
           : undefined;
 
@@ -486,11 +498,16 @@ const evaluateNextStep = async ({ runId, userId }) => {
     }
 
     if (nextPlannedStep.toolId === TOOL_IDS.REVIEW_SENTIMENT_ANALYZER) {
+      const reviewsEvidence = evidenceList.find(
+        (e) =>
+          e.evidenceType === "customer_reviews" ||
+          e.toolId === TOOL_IDS.BUSINESS_REVIEWS_SEARCH
+      );
       const reviewsStep = completedSteps.find(
         (s) => s.input?.toolId === TOOL_IDS.BUSINESS_REVIEWS_SEARCH
       );
 
-      if (!reviewsStep || !reviewsStep.output) {
+      if (!reviewsEvidence && (!reviewsStep || !reviewsStep.output)) {
         return {
           action: "FAIL",
           reason:
@@ -500,12 +517,17 @@ const evaluateNextStep = async ({ runId, userId }) => {
 
       let businessName = null;
       if (
-        typeof reviewsStep.output.businessName === "string" &&
+        typeof reviewsEvidence?.data?.businessName === "string" &&
+        reviewsEvidence.data.businessName.trim()
+      ) {
+        businessName = reviewsEvidence.data.businessName.trim();
+      } else if (
+        typeof reviewsStep?.output?.businessName === "string" &&
         reviewsStep.output.businessName.trim()
       ) {
         businessName = reviewsStep.output.businessName.trim();
       } else if (
-        typeof reviewsStep.input?.businessName === "string" &&
+        typeof reviewsStep?.input?.businessName === "string" &&
         reviewsStep.input.businessName.trim()
       ) {
         businessName = reviewsStep.input.businessName.trim();
@@ -519,21 +541,29 @@ const evaluateNextStep = async ({ runId, userId }) => {
         };
       }
 
-      const reviews = Array.isArray(reviewsStep.output.reviews)
-        ? reviewsStep.output.reviews
-        : [];
+      const reviews = Array.isArray(reviewsEvidence?.data?.reviews)
+        ? reviewsEvidence.data.reviews
+        : Array.isArray(reviewsStep?.output?.reviews)
+          ? reviewsStep.output.reviews
+          : [];
 
+      const competitorEvidence = evidenceList.find(
+        (e) =>
+          e.evidenceType === "competitor_discovery" ||
+          e.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH
+      );
       const searchStep = completedSteps.find(
         (s) => s.input?.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH
       );
 
       const businessType =
-        typeof searchStep?.input?.businessType === "string" &&
-        searchStep.input.businessType.trim()
-          ? searchStep.input.businessType.trim()
-          : (typeof nextPlannedStep.params?.businessType === "string"
-              ? nextPlannedStep.params.businessType.trim()
-              : "business");
+        (typeof competitorEvidence?.metadata?.params?.businessType === "string" &&
+          competitorEvidence.metadata.params.businessType.trim()) ||
+        (typeof searchStep?.input?.businessType === "string" &&
+          searchStep.input.businessType.trim()) ||
+        (typeof nextPlannedStep.params?.businessType === "string"
+          ? nextPlannedStep.params.businessType.trim()
+          : "business");
 
       return {
         action: "EXECUTE_TOOL",

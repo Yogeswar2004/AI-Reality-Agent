@@ -102,7 +102,19 @@ export const extractEvidenceFromStep = (step, runContext = {}) => {
           step.output.confidence.trim())
           ? step.output.confidence
           : null;
+
+      const rawBusinessName =
+        (typeof step.input?.params?.businessName === "string" &&
+          step.input.params.businessName.trim()) ||
+        (typeof step.input?.businessName === "string" &&
+          step.input.businessName.trim()) ||
+        (typeof step.output?.businessName === "string" &&
+          step.output.businessName.trim()) ||
+        null;
+      const businessName = rawBusinessName ? rawBusinessName.trim() : null;
+
       data = {
+        businessName,
         summary: step.output.summary,
         strengths: Array.isArray(step.output.strengths)
           ? [...step.output.strengths]

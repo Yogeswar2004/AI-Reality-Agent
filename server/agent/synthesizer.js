@@ -7,19 +7,27 @@ class SynthesizerError extends Error {
   }
 }
 
+const EVIDENCE_TYPE_TO_TOOL_MAP = {
+  tech_assessment: "tech_idea_analysis",
+  competitor_discovery: "nearby_business_search",
+  customer_reviews: "business_reviews_search",
+  sentiment_analysis: "review_sentiment_analyzer",
+};
+
 /**
  * Pure deterministic synthesis function.
  * Derives every claim, score, suggested technology, and risk solely from
- * actual completed tool outputs in `steps`. Zero invented market evidence.
+ * actual completed tool outputs in `steps` and/or `evidence`. Zero invented market evidence.
  *
  * Side-effect-free: no DB access, no network calls, no state mutations.
  *
  * @param {Object} params
  * @param {Object} params.run - Read-only agent run snapshot { _id, goal, location, budget, stepCount, plan }
  * @param {Array<Object>} [params.steps=[]] - Read-only array of step documents for this run
+ * @param {Array<Object>} [params.evidence=[]] - Read-only array of evidence documents for this run
  * @returns {Object} Structured finalOutput recommendation
  */
-const synthesizeFinalRecommendation = ({ run, steps = [] }) => {
+const synthesizeFinalRecommendation = ({ run, steps = [], evidence = [] }) => {
   if (!run || typeof run !== "object") {
     throw new SynthesizerError("Run object is required for synthesis", "INVALID_RUN", 400);
   }
@@ -31,8 +39,10 @@ const synthesizeFinalRecommendation = ({ run, steps = [] }) => {
   const cleanGoal = run.goal.trim();
   const cleanLocation = typeof run.location === "string" ? run.location.trim() || null : null;
 
-  // 1. Partition steps
+  // 1. Partition steps (for execution history and failure tracking)
   const safeSteps = Array.isArray(steps) ? steps : [];
+  const safeEvidence = Array.isArray(evidence) ? evidence : [];
+
   const toolSteps = safeSteps.filter((s) => s && s.type === "tool_execution");
   const completedToolSteps = toolSteps.filter((s) => s.status === "completed");
   const failedToolSteps = toolSteps.filter((s) => s.status === "failed");
@@ -41,9 +51,17 @@ const synthesizeFinalRecommendation = ({ run, steps = [] }) => {
     .map((s) => s.input?.toolId)
     .filter((id) => typeof id === "string");
 
-  const successfulTools = completedToolSteps
+  // If evidence is provided, successful tools are derived from evidence toolIds or mapped evidenceTypes, unioned with completed steps
+  const evidenceToolIds = safeEvidence
+    .map((e) => e.toolId || EVIDENCE_TYPE_TO_TOOL_MAP[e.evidenceType])
+    .filter((id) => typeof id === "string");
+  const stepToolIds = completedToolSteps
     .map((s) => s.input?.toolId)
     .filter((id) => typeof id === "string");
+
+  const successfulTools = safeEvidence.length > 0
+    ? [...new Set([...evidenceToolIds, ...stepToolIds])]
+    : stepToolIds;
 
   const failedTools = failedToolSteps.map((s) => ({
     toolId: s.input?.toolId || "unknown",
@@ -59,19 +77,34 @@ const synthesizeFinalRecommendation = ({ run, steps = [] }) => {
     partial = true;
   } else if (plannedToolIds.length > 0 && successfulTools.length < plannedToolIds.length) {
     partial = true;
-  } else if (toolSteps.length === 0) {
+  } else if (toolSteps.length === 0 && safeEvidence.length === 0) {
     partial = true;
   }
 
-  // 2. Extract tool-grounded outputs (specifically tech_idea_analysis)
+  // 2. Locate evidence objects (or fallback to completed step outputs)
+  const techEvidence = safeEvidence.find(
+    (e) => e.evidenceType === "tech_assessment" || e.toolId === "tech_idea_analysis"
+  );
   const techIdeaStep = completedToolSteps.find(
     (s) => s.input?.toolId === "tech_idea_analysis"
+  );
+
+  const nearbyEvidence = safeEvidence.find(
+    (e) => e.evidenceType === "competitor_discovery" || e.toolId === "nearby_business_search"
   );
   const nearbyStep = completedToolSteps.find(
     (s) => s.input?.toolId === "nearby_business_search"
   );
+
+  const reviewsEvidence = safeEvidence.find(
+    (e) => e.evidenceType === "customer_reviews" || e.toolId === "business_reviews_search"
+  );
   const reviewsStep = completedToolSteps.find(
     (s) => s.input?.toolId === "business_reviews_search"
+  );
+
+  const sentimentEvidence = safeEvidence.find(
+    (e) => e.evidenceType === "sentiment_analysis" || e.toolId === "review_sentiment_analyzer"
   );
   const sentimentStep = completedToolSteps.find(
     (s) => s.input?.toolId === "review_sentiment_analyzer"
@@ -82,23 +115,23 @@ const synthesizeFinalRecommendation = ({ run, steps = [] }) => {
   let marketFitScore = null;
   const keyRisks = [];
 
-  if (techIdeaStep && techIdeaStep.output) {
-    const out = techIdeaStep.output;
-    if (typeof out.feasibility === "string") {
-      feasibility = out.feasibility;
+  const techData = techEvidence?.data ?? techIdeaStep?.output;
+  if (techData && typeof techData === "object") {
+    if (typeof techData.feasibility === "string") {
+      feasibility = techData.feasibility;
     }
-    if (Array.isArray(out.suggestedStack)) {
-      suggestedStack = [...out.suggestedStack];
+    if (Array.isArray(techData.suggestedStack)) {
+      suggestedStack = [...techData.suggestedStack];
     }
-    if (typeof out.marketFitScore === "number" && isFinite(out.marketFitScore)) {
-      marketFitScore = out.marketFitScore;
+    if (typeof techData.marketFitScore === "number" && isFinite(techData.marketFitScore)) {
+      marketFitScore = techData.marketFitScore;
     }
-    if (Array.isArray(out.risks)) {
-      keyRisks.push(...out.risks);
+    if (Array.isArray(techData.risks)) {
+      keyRisks.push(...techData.risks);
     }
   }
 
-  // If any tool failed, append the failure as an explicit risk
+  // If any tool failed in steps, append the failure as an explicit risk
   for (const failed of failedTools) {
     keyRisks.push(`Tool execution failed for '${failed.toolId}': ${failed.error}`);
   }
@@ -109,20 +142,22 @@ const synthesizeFinalRecommendation = ({ run, steps = [] }) => {
   let competitorDensity = null;
   let averageCompetitorRating = null;
   let totalCompetitorReviews = 0;
+  let discoveredBusinesses = [];
 
-  if (nearbyStep?.output && typeof nearbyStep.output === "object") {
-    const out = nearbyStep.output;
-    if (typeof out.totalFound === "number" && Array.isArray(out.businesses)) {
+  const nearbyData = nearbyEvidence?.data ?? nearbyStep?.output;
+  if (nearbyData && typeof nearbyData === "object") {
+    if (typeof nearbyData.totalFound === "number" && Array.isArray(nearbyData.businesses)) {
       hasValidNearbyEvidence = true;
-      competitorCount = out.totalFound;
-      if (out.density && typeof out.density === "object") {
-        competitorDensity = { ...out.density };
+      competitorCount = nearbyData.totalFound;
+      discoveredBusinesses = nearbyData.businesses;
+      if (nearbyData.density && typeof nearbyData.density === "object") {
+        competitorDensity = { ...nearbyData.density };
       }
-      if (typeof out.averageRating === "number" && isFinite(out.averageRating)) {
-        averageCompetitorRating = out.averageRating;
+      if (typeof nearbyData.averageRating === "number" && isFinite(nearbyData.averageRating)) {
+        averageCompetitorRating = nearbyData.averageRating;
       }
-      if (typeof out.totalReviews === "number" && isFinite(out.totalReviews)) {
-        totalCompetitorReviews = out.totalReviews;
+      if (typeof nearbyData.totalReviews === "number" && isFinite(nearbyData.totalReviews)) {
+        totalCompetitorReviews = nearbyData.totalReviews;
       }
     }
   }
@@ -132,14 +167,15 @@ const synthesizeFinalRecommendation = ({ run, steps = [] }) => {
   let reviewsSampled = 0;
   let integrityRisk = null;
 
-  if (reviewsStep?.output && typeof reviewsStep.output === "object") {
-    const rOut = reviewsStep.output;
-    const reviewBusinessId = typeof rOut.businessId === "string" ? rOut.businessId.trim() : "";
-    const reviewBusinessName = typeof rOut.businessName === "string" ? rOut.businessName.trim() : "";
+  const reviewsData = reviewsEvidence?.data ?? reviewsStep?.output;
+  if (reviewsData && typeof reviewsData === "object") {
+    const reviewBusinessId =
+      typeof reviewsData.businessId === "string" ? reviewsData.businessId.trim() : "";
+    const reviewBusinessName =
+      typeof reviewsData.businessName === "string" ? reviewsData.businessName.trim() : "";
 
     if (hasValidNearbyEvidence) {
-      const nearbyBusinesses = nearbyStep.output.businesses;
-      const matchingCompetitor = nearbyBusinesses.find(
+      const matchingCompetitor = discoveredBusinesses.find(
         (b) => typeof b.placeId === "string" && b.placeId.trim() === reviewBusinessId
       );
 
@@ -147,22 +183,22 @@ const synthesizeFinalRecommendation = ({ run, steps = [] }) => {
         hasValidReviewsEvidence = true;
         reviewedBusinessName = reviewBusinessName || matchingCompetitor.name || null;
         reviewsSampled =
-          typeof rOut.totalReviews === "number"
-            ? rOut.totalReviews
-            : Array.isArray(rOut.reviews)
-              ? rOut.reviews.length
+          typeof reviewsData.totalReviews === "number"
+            ? reviewsData.totalReviews
+            : Array.isArray(reviewsData.reviews)
+              ? reviewsData.reviews.length
               : 0;
       } else {
         integrityRisk = `Evidence mismatch: Reviews target placeId '${reviewBusinessId}' does not match any discovered nearby business`;
       }
-    } else if (!nearbyStep) {
+    } else if (!nearbyEvidence && !nearbyStep) {
       hasValidReviewsEvidence = true;
       reviewedBusinessName = reviewBusinessName || null;
       reviewsSampled =
-        typeof rOut.totalReviews === "number"
-          ? rOut.totalReviews
-          : Array.isArray(rOut.reviews)
-            ? rOut.reviews.length
+        typeof reviewsData.totalReviews === "number"
+          ? reviewsData.totalReviews
+          : Array.isArray(reviewsData.reviews)
+            ? reviewsData.reviews.length
             : 0;
     } else {
       integrityRisk = "Evidence mismatch: Reviews executed with missing or invalid nearby search evidence";
@@ -177,26 +213,34 @@ const synthesizeFinalRecommendation = ({ run, steps = [] }) => {
   let overallSentiment = null;
   let sentimentConfidence = null;
 
-  if (sentimentStep?.output && typeof sentimentStep.output === "object") {
-    const sOut = sentimentStep.output;
-    const sentimentTargetName =
-      typeof sentimentStep.input?.businessName === "string"
-        ? sentimentStep.input.businessName.trim()
-        : null;
+  const sentimentData = sentimentEvidence?.data ?? sentimentStep?.output;
+  if (sentimentData && typeof sentimentData === "object") {
+    const rawTargetName =
+      (typeof sentimentData.businessName === "string" && sentimentData.businessName.trim()) ||
+      (typeof sentimentEvidence?.metadata?.params?.businessName === "string" &&
+        sentimentEvidence.metadata.params.businessName.trim()) ||
+      (typeof sentimentStep?.input?.businessName === "string" &&
+        sentimentStep.input.businessName.trim()) ||
+      (typeof sentimentStep?.input?.params?.businessName === "string" &&
+        sentimentStep.input.params.businessName.trim()) ||
+      null;
+    const sentimentTargetName = rawTargetName ? rawTargetName.trim() : null;
 
     const isNameMatching =
       !reviewedBusinessName ||
       !sentimentTargetName ||
       reviewedBusinessName.toLowerCase() === sentimentTargetName.toLowerCase();
 
-    if (isNameMatching && (!reviewsStep || hasValidReviewsEvidence)) {
+    if (isNameMatching && (!reviewsEvidence && !reviewsStep || hasValidReviewsEvidence)) {
       hasValidSentimentEvidence = true;
-      if (typeof sOut.summary === "string") sentimentSummary = sOut.summary;
-      if (Array.isArray(sOut.strengths)) sentimentStrengths = [...sOut.strengths];
-      if (Array.isArray(sOut.weaknesses)) sentimentWeaknesses = [...sOut.weaknesses];
-      if (Array.isArray(sOut.opportunities)) sentimentOpportunities = [...sOut.opportunities];
-      if (typeof sOut.overallSentiment === "string") overallSentiment = sOut.overallSentiment;
-      if (typeof sOut.confidence === "string") sentimentConfidence = sOut.confidence;
+      if (typeof sentimentData.summary === "string") sentimentSummary = sentimentData.summary;
+      if (Array.isArray(sentimentData.strengths)) sentimentStrengths = [...sentimentData.strengths];
+      if (Array.isArray(sentimentData.weaknesses)) sentimentWeaknesses = [...sentimentData.weaknesses];
+      if (Array.isArray(sentimentData.opportunities)) sentimentOpportunities = [...sentimentData.opportunities];
+      if (typeof sentimentData.overallSentiment === "string") overallSentiment = sentimentData.overallSentiment;
+      if (typeof sentimentData.confidence === "string" || typeof sentimentData.confidence === "number") {
+        sentimentConfidence = sentimentData.confidence;
+      }
     } else if (!integrityRisk) {
       integrityRisk = `Evidence mismatch: Sentiment analyzed business '${sentimentTargetName}' does not match reviewed business '${reviewedBusinessName}'`;
     }
