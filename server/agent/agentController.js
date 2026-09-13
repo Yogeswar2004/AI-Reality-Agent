@@ -5,7 +5,10 @@ import {
   claimAgentRunSynthesis,
   createAgentRun as createRun,
   getAgentRunById,
+  recordAgentRunClarificationAnswer,
   saveAgentRunFinalOutput,
+  setAgentRunClarification,
+  stopAgentRun,
   updateAgentRunPlan,
   updateAgentRunState as updateRunState,
 } from "./agentRun.js";
@@ -148,6 +151,55 @@ const updateAgentRunState = async (req, res) => {
   }
 };
 
+const processAdvisoryDecision = async ({ runId, userId, run, decision }) => {
+  if (!decision || typeof decision !== "object") {
+    return { decision, run };
+  }
+
+  // Handle ASK_USER: transition EXECUTING -> AWAITING_CLARIFICATION & persist clarification
+  if (decision.action === "ASK_USER") {
+    if (run.state === AGENT_STATES.EXECUTING) {
+      if (!run.clarification || run.clarification.answer !== null) {
+        const updatedRun = await setAgentRunClarification({
+          runId,
+          userId,
+          clarification: {
+            question:
+              typeof decision.question === "string"
+                ? decision.question.trim()
+                : "",
+            options: Array.isArray(decision.options) ? decision.options : [],
+            answer: null,
+            askedAt: new Date(),
+            answeredAt: null,
+          },
+          nextState: AGENT_STATES.AWAITING_CLARIFICATION,
+        });
+        return { decision, run: updatedRun };
+      }
+    }
+  }
+
+  // Handle STOP: transition EXECUTING -> CANCELLED & persist stop metadata
+  if (decision.action === "STOP") {
+    if (run.state === AGENT_STATES.EXECUTING) {
+      const stopMetadata = {
+        type: "agent_stop",
+        reason: decision.reason,
+        summary: decision.summary || decision.reason,
+      };
+      const updatedRun = await stopAgentRun({
+        runId,
+        userId,
+        stopMetadata,
+      });
+      return { decision, run: updatedRun };
+    }
+  }
+
+  return { decision, run };
+};
+
 const executeTool = async (req, res) => {
   const runId = req.params.id;
   const userId = req.user.userId;
@@ -169,8 +221,24 @@ const executeTool = async (req, res) => {
     });
 
     let nextDecision = null;
+    let updatedRunFromDecision = null;
     try {
       nextDecision = await evaluateNextStep({ runId, userId });
+      if (nextDecision) {
+        const currentRun = await getAgentRunById({ id: runId, userId });
+        if (currentRun) {
+          const processed = await processAdvisoryDecision({
+            runId,
+            userId,
+            run: currentRun,
+            decision: nextDecision,
+          });
+          nextDecision = processed.decision;
+          if (processed.run) {
+            updatedRunFromDecision = processed.run;
+          }
+        }
+      }
     } catch (evalErr) {
       console.warn(
         "Could not evaluate next decision after tool execution:",
@@ -180,6 +248,7 @@ const executeTool = async (req, res) => {
 
     return res.status(200).json({
       ...result,
+      ...(updatedRunFromDecision ? { run: updatedRunFromDecision } : {}),
       nextDecision,
     });
   } catch (error) {
@@ -355,14 +424,58 @@ const getRunPlan = async (req, res) => {
 
 const getNextDecision = async (req, res) => {
   try {
+    const runId = req.params.id;
+    const userId = req.user.userId;
+
+    if (!ObjectId.isValid(runId)) {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_RUN_ID",
+        message: "Invalid run ID",
+      });
+    }
+
+    const run = await getAgentRunById({ id: runId, userId });
+    if (!run) {
+      return res.status(404).json({
+        success: false,
+        code: "RUN_NOT_FOUND",
+        message: "Agent run not found or access denied",
+      });
+    }
+
+    // If run is already in AWAITING_CLARIFICATION with an active pending clarification,
+    // return existing pending clarification without duplicating records or resetting timestamps.
+    if (run.state === AGENT_STATES.AWAITING_CLARIFICATION && run.clarification) {
+      return res.status(200).json({
+        success: true,
+        decision: {
+          action: "ASK_USER",
+          question: run.clarification.question,
+          options: run.clarification.options || [],
+          reasoning: "Awaiting user response to clarifying question",
+          source: "persisted_clarification",
+        },
+        run,
+      });
+    }
+
     const decision = await evaluateNextStep({
-      runId: req.params.id,
-      userId: req.user.userId,
+      runId,
+      userId,
+    });
+
+    const processed = await processAdvisoryDecision({
+      runId,
+      userId,
+      run,
+      decision,
     });
 
     return res.status(200).json({
       success: true,
-      decision,
+      decision: processed.decision,
+      ...(processed.run ? { run: processed.run } : {}),
     });
   } catch (error) {
     if (error instanceof PlannerError) {
@@ -378,6 +491,76 @@ const getNextDecision = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Failed to evaluate next decision",
+    });
+  }
+};
+
+const submitClarificationAnswer = async (req, res) => {
+  try {
+    const runId = req.params.id;
+    const userId = req.user.userId;
+
+    if (!ObjectId.isValid(runId)) {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_RUN_ID",
+        message: "Invalid run ID",
+      });
+    }
+
+    const { answer } = req.body;
+    if (typeof answer !== "string" || !answer.trim()) {
+      return res.status(400).json({
+        success: false,
+        code: "BLANK_ANSWER",
+        message: "Answer must not be empty",
+      });
+    }
+
+    const updatedRun = await recordAgentRunClarificationAnswer({
+      runId,
+      userId,
+      answer: answer.trim(),
+    });
+
+    if (!updatedRun) {
+      return res.status(404).json({
+        success: false,
+        code: "RUN_NOT_FOUND",
+        message: "Agent run not found or access denied",
+      });
+    }
+
+    let nextDecision = null;
+    try {
+      nextDecision = await evaluateNextStep({ runId, userId });
+    } catch (evalErr) {
+      console.warn(
+        "Could not evaluate next decision after clarification answer:",
+        evalErr?.message
+      );
+    }
+
+    return res.status(200).json({
+      success: true,
+      run: updatedRun,
+      nextDecision,
+      validNextStates: getValidNextStates(updatedRun.state),
+    });
+  } catch (error) {
+    if (error instanceof AgentRunStateError) {
+      return res.status(400).json({
+        success: false,
+        code: error.code || "STATE_ERROR",
+        message: error.message,
+      });
+    }
+
+    console.error("Submit clarification answer error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to record clarification answer",
     });
   }
 };
@@ -752,6 +935,7 @@ const getAgentRunStatus = async (req, res) => {
       },
       nextDecision,
       validNextStates: getValidNextStates(run.state),
+      clarification: run.clarification || null,
       completedAt: run.completedAt,
       cancellationReason: run.cancellationReason,
       error: run.error,
@@ -830,6 +1014,8 @@ export {
   getRunEvidence,
   getRunFinalOutput,
   getRunPlan,
+  processAdvisoryDecision,
+  submitClarificationAnswer,
   synthesizeRunOutput,
   updateAgentRunState,
 };

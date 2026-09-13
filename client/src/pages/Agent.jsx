@@ -41,6 +41,7 @@ function Agent() {
   const [error, setError] = useState("");
   const [showAuditTimeline, setShowAuditTimeline] = useState(true);
   const [expandedStepId, setExpandedStepId] = useState(null);
+  const [clarificationAnswer, setClarificationAnswer] = useState("");
 
   // Determine active stage
   const getStage = () => {
@@ -49,7 +50,7 @@ function Agent() {
     if (run.state === "draft" || run.state === "planning" || run.state === "awaiting_approval") {
       return 2; // Plan Review
     }
-    return 3; // Controlled Investigation (executing, synthesizing, quota_limited, failed, cancelled)
+    return 3; // Controlled Investigation (executing, awaiting_clarification, synthesizing, quota_limited, failed, cancelled)
   };
 
   const stage = getStage();
@@ -82,6 +83,7 @@ function Agent() {
           completedAt: data.completedAt,
           cancellationReason: data.cancellationReason,
           error: data.error,
+          clarification: data.clarification !== undefined ? data.clarification : prev?.clarification,
         }));
         if (data.plan) setPlan(data.plan);
         if (data.nextDecision) setNextDecision(data.nextDecision);
@@ -207,6 +209,41 @@ function Agent() {
     }
   };
 
+  // --- Clarification: Submit Answer ---
+  const handleSubmitClarification = async (customAnswer) => {
+    if (!run) return;
+    const answerToUse = (typeof customAnswer === "string" ? customAnswer : clarificationAnswer).trim();
+    if (!answerToUse) {
+      setError("Please select or enter an answer to proceed.");
+      return;
+    }
+    setError("");
+    setLoadingAction("submitting_clarification");
+
+    try {
+      const response = await api.post(`/agent/runs/${run._id}/clarification`, {
+        answer: answerToUse,
+      });
+
+      if (response.data.run) {
+        setRun((prev) => ({ ...prev, ...response.data.run }));
+      }
+      if (response.data.nextDecision) {
+        setNextDecision(response.data.nextDecision);
+      }
+      setClarificationAnswer("");
+      await fetchSteps(run._id);
+      await refreshStatus(run._id);
+    } catch (err) {
+      setError(
+        err.response?.data?.message || "Failed to submit clarification."
+      );
+      await refreshStatus(run._id);
+    } finally {
+      setLoadingAction("");
+    }
+  };
+
   // --- 4. SYNTHESIS: Synthesize Recommendation ---
   const handleSynthesize = async () => {
     if (!run) return;
@@ -236,6 +273,7 @@ function Agent() {
     setSteps([]);
     setNextDecision(null);
     setFinalOutput(null);
+    setClarificationAnswer("");
     setError("");
     setGoal("");
     setLocation("");
@@ -251,6 +289,8 @@ function Agent() {
         return { bg: "rgba(124, 58, 237, 0.15)", color: "#C4B5FD", border: "rgba(139, 92, 246, 0.3)" };
       case "awaiting_approval":
         return { bg: "rgba(245, 158, 11, 0.15)", color: "#FCD34D", border: "rgba(245, 158, 11, 0.3)" };
+      case "awaiting_clarification":
+        return { bg: "rgba(59, 130, 246, 0.15)", color: "#93C5FD", border: "rgba(59, 130, 246, 0.3)" };
       case "failed":
         return { bg: "rgba(239, 68, 68, 0.15)", color: "#FCA5A5", border: "rgba(239, 68, 68, 0.3)" };
       case "quota_limited":
@@ -549,201 +589,380 @@ function Agent() {
         {/* ===================================================
             STAGE 3: CONTROLLED INVESTIGATION FEED
         =================================================== */}
-        {stage === 3 && run && (
-          <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
-            {/* REAL-TIME RUN CONTROLLER HEADER */}
-            <section style={styles.card}>
-              <div style={styles.cardHeader}>
-                <div>
-                  <span style={styles.cardEyebrow}>STAGE 3 — CONTROLLED EXECUTION</span>
-                  <h2 style={styles.cardTitle}>{run.goal}</h2>
-                  <p style={styles.cardSubtitle}>
-                    Location: <strong>{run.location || "Digital / Global"}</strong> • Run ID: {run._id}
-                  </p>
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                  <span style={{ ...styles.badge, ...getStateBadgeStyle(run.state) }}>
-                    {run.state?.toUpperCase().replace("_", " ")}
-                  </span>
-                  {run.state === "executing" && (
-                    <button
-                      type="button"
-                      style={styles.smallDangerBtn}
-                      disabled={Boolean(loadingAction)}
-                      onClick={() => handleCancelRun("Cancelled by user")}
-                    >
-                      Cancel Run
-                    </button>
-                  )}
-                </div>
-              </div>
+        {stage === 3 && run && (() => {
+          const isAgentStop = (nextDecision?.action === "STOP") || (run.state === "cancelled" && typeof run.cancellationReason === "object" && run.cancellationReason?.type === "agent_stop");
+          const stopReason = (typeof run.cancellationReason === "object" && run.cancellationReason?.reason) || nextDecision?.reason || "Agent concluded research goals satisfied";
+          const stopSummary = (typeof run.cancellationReason === "object" && run.cancellationReason?.summary) || nextDecision?.summary || nextDecision?.reasoning || null;
 
-              {/* BUDGET COUNTERS */}
-              <div style={styles.statsGrid}>
-                <div style={styles.statCard}>
-                  <span style={styles.metricLabel}>Total Steps</span>
-                  <span style={styles.statValue}>
-                    {run.stepCount || 0}
-                    <span style={styles.statSubValue}> / {run.budget?.maxSteps || 8}</span>
-                  </span>
-                </div>
-                <div style={styles.statCard}>
-                  <span style={styles.metricLabel}>External API Calls</span>
-                  <span style={styles.statValue}>
-                    {run.externalCallCount || 0}
-                    <span style={styles.statSubValue}> / {run.budget?.maxExternalCalls || 5}</span>
-                  </span>
-                </div>
-                <div style={styles.statCard}>
-                  <span style={styles.metricLabel}>Completed Steps</span>
-                  <span style={styles.statValue}>
-                    {steps.filter((s) => s.status === "completed").length}
-                  </span>
-                </div>
-                <div style={styles.statCard}>
-                  <span style={styles.metricLabel}>Failed Steps</span>
-                  <span style={styles.statValue}>
-                    {steps.filter((s) => s.status === "failed").length}
-                  </span>
-                </div>
-              </div>
-            </section>
+          const isAwaitingClarification = run.state === "awaiting_clarification" || nextDecision?.action === "ASK_USER";
+          const clarificationQuestion = run.clarification?.question || nextDecision?.question || "Clarification needed to proceed";
+          const clarificationOptions = Array.isArray(run.clarification?.options) ? run.clarification.options : Array.isArray(nextDecision?.options) ? nextDecision.options : [];
+          const clarificationReasoning = run.clarification?.reasoning || nextDecision?.reasoning || null;
 
-            {/* ADVISORY NEXT DECISION CARD */}
-            {run.state === "executing" && nextDecision && (
-              <section style={styles.actionPromptCard}>
-                <div style={styles.actionPromptHeader}>
-                  <div style={styles.actionIconContainer}>
-                    {nextDecision.action === "EXECUTE_TOOL" && "⚡"}
-                    {nextDecision.action === "TRANSITION_SYNTHESIZING" && "✦"}
-                    {nextDecision.action === "FAIL" && "⚠"}
-                    {nextDecision.action === "QUOTA_EXHAUSTED" && "⊘"}
-                  </div>
+          return (
+            <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+              {/* REAL-TIME RUN CONTROLLER HEADER */}
+              <section style={styles.card}>
+                <div style={styles.cardHeader}>
                   <div>
-                    <span style={styles.actionEyebrow}>PLANNER ADVISORY RECOMMENDATION</span>
-                    <h3 style={styles.actionTitle}>
-                      {nextDecision.action === "EXECUTE_TOOL" && `Execute Tool: ${nextDecision.toolId}`}
-                      {nextDecision.action === "TRANSITION_SYNTHESIZING" && "All Tools Completed — Ready for Synthesis"}
-                      {nextDecision.action === "FAIL" && "Tool Execution Failure Halted Progression"}
-                      {nextDecision.action === "QUOTA_EXHAUSTED" && "Budget Limit Reached"}
-                    </h3>
+                    <span style={styles.cardEyebrow}>STAGE 3 — CONTROLLED EXECUTION</span>
+                    <h2 style={styles.cardTitle}>{run.goal}</h2>
+                    <p style={styles.cardSubtitle}>
+                      Location: <strong>{run.location || "Digital / Global"}</strong> • Run ID: {run._id}
+                    </p>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                    <span style={{ ...styles.badge, ...getStateBadgeStyle(run.state) }}>
+                      {run.state?.toUpperCase().replace("_", " ")}
+                    </span>
+                    {(run.state === "executing" || run.state === "awaiting_clarification") && (
+                      <button
+                        type="button"
+                        style={styles.smallDangerBtn}
+                        disabled={Boolean(loadingAction)}
+                        onClick={() => handleCancelRun("Cancelled by user")}
+                      >
+                        Cancel Run
+                      </button>
+                    )}
                   </div>
                 </div>
 
-                {nextDecision.reasoning && (
-                  <p style={styles.actionReasoning}>{nextDecision.reasoning}</p>
-                )}
-                {nextDecision.reason && (
-                  <p style={{ ...styles.actionReasoning, color: "#FCA5A5" }}>{nextDecision.reason}</p>
-                )}
-
-                {/* Evidence parameters preview if executing a tool */}
-                {nextDecision.action === "EXECUTE_TOOL" && nextDecision.input && (
-                  <div style={styles.decisionParamsBox}>
-                    <span style={styles.paramsLabel}>Tool Input Parameters (Derived from prior step evidence):</span>
-                    <pre style={styles.paramsPre}>{JSON.stringify(nextDecision.input, null, 2)}</pre>
+                {/* BUDGET COUNTERS */}
+                <div style={styles.statsGrid}>
+                  <div style={styles.statCard}>
+                    <span style={styles.metricLabel}>Total Steps</span>
+                    <span style={styles.statValue}>
+                      {run.stepCount || 0}
+                      <span style={styles.statSubValue}> / {run.budget?.maxSteps || 8}</span>
+                    </span>
                   </div>
-                )}
-
-                {/* Primary action buttons */}
-                <div style={styles.actionButtonsRow}>
-                  {nextDecision.action === "EXECUTE_TOOL" && (
-                    <button
-                      type="button"
-                      style={{
-                        ...styles.primaryButton,
-                        ...(Boolean(loadingAction) ? styles.buttonDisabled : {}),
-                      }}
-                      disabled={Boolean(loadingAction)}
-                      onClick={handleExecuteNextStep}
-                    >
-                      {loadingAction === "executing_step" ? (
-                        <>
-                          <span style={styles.spinner} /> Running Tool...
-                        </>
-                      ) : (
-                        <>
-                          <span>▶</span> Run Tool Step ({nextDecision.toolId})
-                        </>
-                      )}
-                    </button>
-                  )}
-
-                  {nextDecision.action === "TRANSITION_SYNTHESIZING" && (
-                    <button
-                      type="button"
-                      style={{
-                        ...styles.primaryButton,
-                        background: "linear-gradient(135deg, #10B981, #059669)",
-                        ...(Boolean(loadingAction) ? styles.buttonDisabled : {}),
-                      }}
-                      disabled={Boolean(loadingAction)}
-                      onClick={handleSynthesize}
-                    >
-                      {loadingAction === "synthesizing" ? (
-                        <>
-                          <span style={styles.spinner} /> Synthesizing Recommendation...
-                        </>
-                      ) : (
-                        <>
-                          <span>✦</span> Synthesize Final Recommendation
-                        </>
-                      )}
-                    </button>
-                  )}
-
-                  {nextDecision.action === "FAIL" && (
-                    <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
-                      <button
-                        type="button"
-                        style={styles.cancelButton}
-                        onClick={() => handleCancelRun("Halted on tool failure")}
-                      >
-                        Abort Run
-                      </button>
-                      <button
-                        type="button"
-                        style={styles.secondaryButton}
-                        onClick={handleStartNewRun}
-                      >
-                        Start Fresh Run
-                      </button>
-                    </div>
-                  )}
+                  <div style={styles.statCard}>
+                    <span style={styles.metricLabel}>External API Calls</span>
+                    <span style={styles.statValue}>
+                      {run.externalCallCount || 0}
+                      <span style={styles.statSubValue}> / {run.budget?.maxExternalCalls || 5}</span>
+                    </span>
+                  </div>
+                  <div style={styles.statCard}>
+                    <span style={styles.metricLabel}>Completed Steps</span>
+                    <span style={styles.statValue}>
+                      {steps.filter((s) => s.status === "completed").length}
+                    </span>
+                  </div>
+                  <div style={styles.statCard}>
+                    <span style={styles.metricLabel}>Failed Steps</span>
+                    <span style={styles.statValue}>
+                      {steps.filter((s) => s.status === "failed").length}
+                    </span>
+                  </div>
                 </div>
               </section>
-            )}
 
-            {/* TERMINAL STATE BANNERS (QUOTA LIMITED / CANCELLED / FAILED) */}
-            {run.state === "quota_limited" && (
-              <div style={styles.terminalAlert}>
-                <span style={styles.terminalAlertIcon}>⊘</span>
-                <div>
-                  <h4 style={styles.terminalAlertTitle}>Quota Budget Exhausted</h4>
-                  <p style={styles.terminalAlertText}>
-                    This run reached its configured step or external-call limit. The system halted further tool execution to prevent excessive provider usage.
-                  </p>
-                </div>
-                <button type="button" style={styles.secondaryButton} onClick={handleStartNewRun}>
-                  Start New Run
-                </button>
-              </div>
-            )}
+              {/* ADVISORY NEXT DECISION CARD (TOOL EXECUTION & SYNTHESIS READINESS) */}
+              {run.state === "executing" && nextDecision && nextDecision.action !== "ASK_USER" && nextDecision.action !== "STOP" && (
+                <section style={styles.actionPromptCard}>
+                  <div style={styles.actionPromptHeader}>
+                    <div style={styles.actionIconContainer}>
+                      {nextDecision.action === "EXECUTE_TOOL" && "⚡"}
+                      {nextDecision.action === "TRANSITION_SYNTHESIZING" && "✦"}
+                      {nextDecision.action === "FAIL" && "⚠"}
+                      {nextDecision.action === "QUOTA_EXHAUSTED" && "⊘"}
+                    </div>
+                    <div>
+                      <span style={styles.actionEyebrow}>PLANNER ADVISORY RECOMMENDATION</span>
+                      <h3 style={styles.actionTitle}>
+                        {nextDecision.action === "EXECUTE_TOOL" && `Execute Tool: ${nextDecision.toolId}`}
+                        {nextDecision.action === "TRANSITION_SYNTHESIZING" && "All Tools Completed — Ready for Synthesis"}
+                        {nextDecision.action === "FAIL" && "Tool Execution Failure Halted Progression"}
+                        {nextDecision.action === "QUOTA_EXHAUSTED" && "Budget Limit Reached"}
+                      </h3>
+                    </div>
+                  </div>
 
-            {run.state === "cancelled" && (
-              <div style={styles.terminalAlert}>
-                <span style={styles.terminalAlertIcon}>✕</span>
-                <div>
-                  <h4 style={styles.terminalAlertTitle}>Run Cancelled</h4>
-                  <p style={styles.terminalAlertText}>
-                    Reason: {run.cancellationReason || "Cancelled by user"}.
-                  </p>
+                  {nextDecision.reasoning && (
+                    <p style={styles.actionReasoning}>{nextDecision.reasoning}</p>
+                  )}
+                  {nextDecision.reason && (
+                    <p style={{ ...styles.actionReasoning, color: "#FCA5A5" }}>{nextDecision.reason}</p>
+                  )}
+
+                  {/* Evidence parameters preview if executing a tool */}
+                  {nextDecision.action === "EXECUTE_TOOL" && nextDecision.input && (
+                    <div style={styles.decisionParamsBox}>
+                      <span style={styles.paramsLabel}>Tool Input Parameters (Derived from prior step evidence):</span>
+                      <pre style={styles.paramsPre}>{JSON.stringify(nextDecision.input, null, 2)}</pre>
+                    </div>
+                  )}
+
+                  {/* Primary action buttons */}
+                  <div style={styles.actionButtonsRow}>
+                    {nextDecision.action === "EXECUTE_TOOL" && (
+                      <button
+                        type="button"
+                        style={{
+                          ...styles.primaryButton,
+                          ...(Boolean(loadingAction) ? styles.buttonDisabled : {}),
+                        }}
+                        disabled={Boolean(loadingAction)}
+                        onClick={handleExecuteNextStep}
+                      >
+                        {loadingAction === "executing_step" ? (
+                          <>
+                            <span style={styles.spinner} /> Running Tool...
+                          </>
+                        ) : (
+                          <>
+                            <span>▶</span> Run Tool Step ({nextDecision.toolId})
+                          </>
+                        )}
+                      </button>
+                    )}
+
+                    {nextDecision.action === "TRANSITION_SYNTHESIZING" && (
+                      <button
+                        type="button"
+                        style={{
+                          ...styles.primaryButton,
+                          background: "linear-gradient(135deg, #10B981, #059669)",
+                          ...(Boolean(loadingAction) ? styles.buttonDisabled : {}),
+                        }}
+                        disabled={Boolean(loadingAction)}
+                        onClick={handleSynthesize}
+                      >
+                        {loadingAction === "synthesizing" ? (
+                          <>
+                            <span style={styles.spinner} /> Synthesizing Recommendation...
+                          </>
+                        ) : (
+                          <>
+                            <span>✦</span> Synthesize Final Recommendation
+                          </>
+                        )}
+                      </button>
+                    )}
+
+                    {nextDecision.action === "FAIL" && (
+                      <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
+                        <button
+                          type="button"
+                          style={styles.cancelButton}
+                          onClick={() => handleCancelRun("Halted on tool failure")}
+                        >
+                          Abort Run
+                        </button>
+                        <button
+                          type="button"
+                          style={styles.secondaryButton}
+                          onClick={handleStartNewRun}
+                        >
+                          Start Fresh Run
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </section>
+              )}
+
+              {/* INTERACTIVE CLARIFICATION CARD (ASK_USER) */}
+              {isAwaitingClarification && (
+                <section style={{ ...styles.actionPromptCard, borderColor: "rgba(59, 130, 246, 0.4)", background: "rgba(30, 58, 138, 0.15)" }}>
+                  <div style={styles.actionPromptHeader}>
+                    <div style={{ ...styles.actionIconContainer, background: "rgba(59, 130, 246, 0.2)", color: "#93C5FD", borderColor: "rgba(59, 130, 246, 0.4)" }}>
+                      💬
+                    </div>
+                    <div>
+                      <span style={{ ...styles.actionEyebrow, color: "#93C5FD" }}>AGENT CLARIFICATION NEEDED</span>
+                      <h3 style={styles.actionTitle}>
+                        {clarificationQuestion}
+                      </h3>
+                    </div>
+                  </div>
+
+                  {clarificationReasoning && (
+                    <p style={{ ...styles.actionReasoning, color: "#BFDBFE" }}>{clarificationReasoning}</p>
+                  )}
+
+                  {/* Suggested Option Chips */}
+                  {clarificationOptions.length > 0 && (
+                    <div style={{ margin: "12px 0 16px 0" }}>
+                      <span style={{ fontSize: "11px", fontWeight: "700", color: "#93C5FD", display: "block", marginBottom: "8px", textTransform: "uppercase" }}>
+                        Suggested Options (Click to select):
+                      </span>
+                      <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                        {clarificationOptions.map((opt, idx) => {
+                          const isSelected = clarificationAnswer === opt;
+                          return (
+                            <button
+                              key={idx}
+                              type="button"
+                              style={{
+                                ...styles.presetChip,
+                                background: isSelected ? "rgba(59, 130, 246, 0.35)" : "rgba(255, 255, 255, 0.05)",
+                                borderColor: isSelected ? "#60A5FA" : "rgba(255, 255, 255, 0.12)",
+                                color: isSelected ? "#FFFFFF" : "#D4D4D8",
+                                fontWeight: isSelected ? "750" : "600",
+                              }}
+                              onClick={() => setClarificationAnswer(opt)}
+                            >
+                              {opt}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Clarification Input Form */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginTop: "10px" }}>
+                    <label htmlFor="clarification-input" style={{ fontSize: "12px", color: "#E2E8F0", fontWeight: "600" }}>
+                      Your Response:
+                    </label>
+                    <input
+                      id="clarification-input"
+                      type="text"
+                      maxLength={500}
+                      value={clarificationAnswer}
+                      onChange={(e) => setClarificationAnswer(e.target.value)}
+                      placeholder={clarificationOptions.length > 0 ? "Select an option above or type your answer..." : "Type your response to the agent's question..."}
+                      style={styles.input}
+                      disabled={Boolean(loadingAction)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && clarificationAnswer.trim() && !loadingAction) {
+                          handleSubmitClarification();
+                        }
+                      }}
+                    />
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ fontSize: "11px", color: "#94A3B8" }}>
+                        {clarificationAnswer.length}/500 characters
+                      </span>
+                      <div style={{ display: "flex", gap: "10px" }}>
+                        <button
+                          type="button"
+                          style={styles.cancelButton}
+                          onClick={() => handleCancelRun("User declined clarification")}
+                          disabled={Boolean(loadingAction)}
+                        >
+                          Cancel Run
+                        </button>
+                        <button
+                          type="button"
+                          style={{
+                            ...styles.primaryButton,
+                            background: "linear-gradient(135deg, #2563EB, #3B82F6)",
+                            ...(!clarificationAnswer.trim() || Boolean(loadingAction) ? styles.buttonDisabled : {}),
+                          }}
+                          disabled={!clarificationAnswer.trim() || Boolean(loadingAction)}
+                          onClick={() => handleSubmitClarification()}
+                        >
+                          {loadingAction === "submitting_clarification" ? (
+                            <>
+                              <span style={styles.spinner} /> Submitting...
+                            </>
+                          ) : (
+                            <>
+                              <span>✓</span> Submit Clarification & Resume
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              {/* CONTROLLED STOP SUMMARY CARD (STOP) */}
+              {isAgentStop && (
+                <section style={{ ...styles.actionPromptCard, borderColor: "rgba(168, 85, 247, 0.4)", background: "rgba(88, 28, 135, 0.15)" }}>
+                  <div style={styles.actionPromptHeader}>
+                    <div style={{ ...styles.actionIconContainer, background: "rgba(168, 85, 247, 0.2)", color: "#C084FC", borderColor: "rgba(168, 85, 247, 0.4)" }}>
+                      ⏹
+                    </div>
+                    <div>
+                      <span style={{ ...styles.actionEyebrow, color: "#C084FC" }}>AGENT INVESTIGATION CONCLUDED</span>
+                      <h3 style={styles.actionTitle}>Agent Recommended Controlled Stop</h3>
+                    </div>
+                  </div>
+
+                  <div style={{ margin: "14px 0", display: "flex", flexDirection: "column", gap: "8px" }}>
+                    <p style={{ ...styles.actionReasoning, color: "#F3E8FF", margin: 0 }}>
+                      <strong>Reason:</strong> {stopReason}
+                    </p>
+                    {stopSummary && (
+                      <p style={{ ...styles.actionReasoning, color: "#E9D5FF", margin: 0 }}>
+                        <strong>Summary:</strong> {stopSummary}
+                      </p>
+                    )}
+                    <p style={{ fontSize: "12px", color: "#A855F7", margin: "4px 0 0 0" }}>
+                      Tool execution is safely concluded. No further automated or external queries will be issued for this run.
+                    </p>
+                  </div>
+
+                  <div style={styles.actionButtonsRow}>
+                    {steps.some((s) => s.status === "completed") && (
+                      <button
+                        type="button"
+                        style={{
+                          ...styles.primaryButton,
+                          background: "linear-gradient(135deg, #10B981, #059669)",
+                          ...(Boolean(loadingAction) ? styles.buttonDisabled : {}),
+                        }}
+                        disabled={Boolean(loadingAction)}
+                        onClick={handleSynthesize}
+                      >
+                        {loadingAction === "synthesizing" ? (
+                          <>
+                            <span style={styles.spinner} /> Synthesizing...
+                          </>
+                        ) : (
+                          <>
+                            <span>✦</span> Synthesize Recommendation with Available Evidence
+                          </>
+                        )}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      style={styles.secondaryButton}
+                      onClick={handleStartNewRun}
+                    >
+                      Start New Run
+                    </button>
+                  </div>
+                </section>
+              )}
+
+              {/* TERMINAL STATE BANNERS (QUOTA LIMITED / CANCELLED / FAILED) */}
+              {run.state === "quota_limited" && (
+                <div style={styles.terminalAlert}>
+                  <span style={styles.terminalAlertIcon}>⊘</span>
+                  <div>
+                    <h4 style={styles.terminalAlertTitle}>Quota Budget Exhausted</h4>
+                    <p style={styles.terminalAlertText}>
+                      This run reached its configured step or external-call limit. The system halted further tool execution to prevent excessive provider usage.
+                    </p>
+                  </div>
+                  <button type="button" style={styles.secondaryButton} onClick={handleStartNewRun}>
+                    Start New Run
+                  </button>
                 </div>
-                <button type="button" style={styles.secondaryButton} onClick={handleStartNewRun}>
-                  Start New Run
-                </button>
-              </div>
-            )}
+              )}
+
+              {run.state === "cancelled" && !isAgentStop && (
+                <div style={styles.terminalAlert}>
+                  <span style={styles.terminalAlertIcon}>✕</span>
+                  <div>
+                    <h4 style={styles.terminalAlertTitle}>Run Cancelled</h4>
+                    <p style={styles.terminalAlertText}>
+                      Reason: {typeof run.cancellationReason === "string" ? run.cancellationReason : run.cancellationReason?.reason || "Cancelled by user"}.
+                    </p>
+                  </div>
+                  <button type="button" style={styles.secondaryButton} onClick={handleStartNewRun}>
+                    Start New Run
+                  </button>
+                </div>
+              )}
 
             {/* AUDIT STEP TIMELINE */}
             <section style={styles.card}>
@@ -826,7 +1045,8 @@ function Agent() {
               )}
             </section>
           </div>
-        )}
+        );
+      })()}
 
         {/* ===================================================
             STAGE 4: FINAL RECOMMENDATION DISPLAY

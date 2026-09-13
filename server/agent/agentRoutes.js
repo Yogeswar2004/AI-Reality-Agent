@@ -12,6 +12,7 @@ import {
   getRunEvidence,
   getRunFinalOutput,
   getRunPlan,
+  submitClarificationAnswer,
   synthesizeRunOutput,
   updateAgentRunState,
 } from "./agentController.js";
@@ -27,11 +28,12 @@ router.post("/runs/:id/cancel", authenticateToken, cancelAgentRun);
 router.post("/runs/:id/execute-tool", authenticateToken, executeTool);
 router.get("/runs/:id/evidence", authenticateToken, getRunEvidence);
 
-// Planner advisory and approval endpoints
+// Planner advisory, clarification, and approval endpoints
 router.post("/runs/:id/plan", authenticateToken, generateRunPlan);
 router.get("/runs/:id/plan", authenticateToken, getRunPlan);
 router.get("/runs/:id/next-decision", authenticateToken, getNextDecision);
 router.post("/runs/:id/approve-plan", authenticateToken, approveRunPlan);
+router.post("/runs/:id/clarification", authenticateToken, submitClarificationAnswer);
 
 // Synthesis endpoints
 router.post("/runs/:id/synthesize", authenticateToken, synthesizeRunOutput);

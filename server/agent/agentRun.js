@@ -42,6 +42,7 @@ const createAgentRun = async ({ userId, goal, location = null }) => {
     // New Phase 2 fields
     error: null,
     cancellationReason: null,
+    clarification: null,
     startedAt: null,
     completedAt: null,
     plan: null,
@@ -121,7 +122,21 @@ const updateAgentRunState = async ({
   };
 
   if (cancellationReason !== null && cancellationReason !== undefined) {
-    updateDoc.cancellationReason = typeof cancellationReason === "string" ? cancellationReason.trim() : null;
+    if (typeof cancellationReason === "object" && cancellationReason !== null) {
+      updateDoc.cancellationReason = {
+        type: cancellationReason.type || "agent_stop",
+        reason:
+          typeof cancellationReason.reason === "string"
+            ? cancellationReason.reason.trim()
+            : "",
+        summary:
+          typeof cancellationReason.summary === "string"
+            ? cancellationReason.summary.trim()
+            : "",
+      };
+    } else if (typeof cancellationReason === "string") {
+      updateDoc.cancellationReason = cancellationReason.trim();
+    }
   }
 
   if (error !== null && error !== undefined) {
@@ -419,6 +434,255 @@ const saveAgentRunFinalOutput = async ({
   return serializeAgentRun(updatedRun);
 };
 
+const setAgentRunClarification = async ({
+  runId,
+  userId,
+  clarification,
+  nextState = AGENT_STATES.AWAITING_CLARIFICATION,
+}) => {
+  if (!ObjectId.isValid(runId)) {
+    return null;
+  }
+
+  const collection = getDB().collection(AGENT_RUNS_COLLECTION);
+  const currentRun = await collection.findOne({
+    _id: new ObjectId(runId),
+    userId,
+  });
+
+  if (!currentRun) {
+    return null;
+  }
+
+  if (currentRun.state !== AGENT_STATES.EXECUTING) {
+    throw new AgentRunStateError(
+      `Cannot request clarification when run is in state '${currentRun.state}' (must be '${AGENT_STATES.EXECUTING}')`,
+      "INVALID_STATE"
+    );
+  }
+
+  // Prevent overwriting an existing pending clarification
+  if (currentRun.clarification && currentRun.clarification.answer === null) {
+    return serializeAgentRun(currentRun);
+  }
+
+  const now = new Date();
+  const formattedClarification = {
+    question:
+      typeof clarification?.question === "string"
+        ? clarification.question.trim()
+        : "",
+    options: Array.isArray(clarification?.options)
+      ? clarification.options
+          .map((o) => (typeof o === "string" ? o.trim() : String(o)))
+          .filter(Boolean)
+      : [],
+    answer: null,
+    askedAt:
+      clarification?.askedAt instanceof Date
+        ? clarification.askedAt
+        : now,
+    answeredAt: null,
+  };
+
+  const updatedRun = await collection.findOneAndUpdate(
+    {
+      _id: currentRun._id,
+      userId,
+      state: AGENT_STATES.EXECUTING,
+    },
+    {
+      $set: {
+        clarification: formattedClarification,
+        state: nextState,
+        updatedAt: now,
+      },
+    },
+    {
+      returnDocument: "after",
+      includeResultMetadata: false,
+    }
+  );
+
+  if (!updatedRun) {
+    throw new AgentRunStateError(
+      "Agent run state changed before clarification could be set",
+      "STATE_CONFLICT"
+    );
+  }
+
+  return serializeAgentRun(updatedRun);
+};
+
+const recordAgentRunClarificationAnswer = async ({ runId, userId, answer }) => {
+  if (!ObjectId.isValid(runId)) {
+    return null;
+  }
+
+  const collection = getDB().collection(AGENT_RUNS_COLLECTION);
+  const currentRun = await collection.findOne({
+    _id: new ObjectId(runId),
+    userId,
+  });
+
+  if (!currentRun) {
+    return null;
+  }
+
+  if (currentRun.state !== AGENT_STATES.AWAITING_CLARIFICATION) {
+    throw new AgentRunStateError(
+      `Cannot answer clarification when run is in state '${currentRun.state}' (must be '${AGENT_STATES.AWAITING_CLARIFICATION}')`,
+      "INVALID_STATE"
+    );
+  }
+
+  if (!currentRun.clarification) {
+    throw new AgentRunStateError(
+      "No pending clarification request found for this run",
+      "NO_PENDING_CLARIFICATION"
+    );
+  }
+
+  if (currentRun.clarification.answer !== null) {
+    throw new AgentRunStateError(
+      "Clarification has already been answered",
+      "ALREADY_ANSWERED"
+    );
+  }
+
+  if (typeof answer !== "string" || !answer.trim()) {
+    throw new AgentRunStateError("Answer must not be empty", "BLANK_ANSWER");
+  }
+
+  const cleanAnswer = answer.trim();
+
+  if (cleanAnswer.length > 500) {
+    throw new AgentRunStateError(
+      "Answer must not exceed 500 characters",
+      "ANSWER_TOO_LONG"
+    );
+  }
+
+  const options = Array.isArray(currentRun.clarification.options)
+    ? currentRun.clarification.options
+    : [];
+
+  if (options.length > 0) {
+    const matched = options.find(
+      (opt) =>
+        typeof opt === "string" &&
+        opt.trim().toLowerCase() === cleanAnswer.toLowerCase()
+    );
+    if (!matched) {
+      throw new AgentRunStateError(
+        `Answer must be one of the provided options: ${options.join(", ")}`,
+        "INVALID_OPTION"
+      );
+    }
+  }
+
+  const now = new Date();
+  const updatedClarification = {
+    ...currentRun.clarification,
+    answer: cleanAnswer,
+    answeredAt: now,
+  };
+
+  const updatedRun = await collection.findOneAndUpdate(
+    {
+      _id: currentRun._id,
+      userId,
+      state: AGENT_STATES.AWAITING_CLARIFICATION,
+    },
+    {
+      $set: {
+        clarification: updatedClarification,
+        state: AGENT_STATES.EXECUTING,
+        updatedAt: now,
+      },
+    },
+    {
+      returnDocument: "after",
+      includeResultMetadata: false,
+    }
+  );
+
+  if (!updatedRun) {
+    throw new AgentRunStateError(
+      "Agent run state changed before clarification answer could be recorded",
+      "STATE_CONFLICT"
+    );
+  }
+
+  return serializeAgentRun(updatedRun);
+};
+
+const stopAgentRun = async ({ runId, userId, stopMetadata }) => {
+  if (!ObjectId.isValid(runId)) {
+    return null;
+  }
+
+  const collection = getDB().collection(AGENT_RUNS_COLLECTION);
+  const currentRun = await collection.findOne({
+    _id: new ObjectId(runId),
+    userId,
+  });
+
+  if (!currentRun) {
+    return null;
+  }
+
+  if (currentRun.state !== AGENT_STATES.EXECUTING) {
+    throw new AgentRunStateError(
+      `Cannot stop run when in state '${currentRun.state}' (must be '${AGENT_STATES.EXECUTING}')`,
+      "INVALID_STATE"
+    );
+  }
+
+  const now = new Date();
+  const reason =
+    typeof stopMetadata?.reason === "string" && stopMetadata.reason.trim()
+      ? stopMetadata.reason.trim()
+      : "Investigation stopped by agent";
+  const summary =
+    typeof stopMetadata?.summary === "string" && stopMetadata.summary.trim()
+      ? stopMetadata.summary.trim()
+      : reason;
+
+  const updatedRun = await collection.findOneAndUpdate(
+    {
+      _id: currentRun._id,
+      userId,
+      state: AGENT_STATES.EXECUTING,
+    },
+    {
+      $set: {
+        state: AGENT_STATES.CANCELLED,
+        cancellationReason: {
+          type: "agent_stop",
+          reason,
+          summary,
+        },
+        completedAt: currentRun.completedAt || now,
+        updatedAt: now,
+      },
+    },
+    {
+      returnDocument: "after",
+      includeResultMetadata: false,
+    }
+  );
+
+  if (!updatedRun) {
+    throw new AgentRunStateError(
+      "Agent run state changed before stop could be applied",
+      "STATE_CONFLICT"
+    );
+  }
+
+  return serializeAgentRun(updatedRun);
+};
+
 // Indexes for agent_runs
 const initAgentRunIndexes = async () => {
   try {
@@ -447,4 +711,7 @@ export {
   updateAgentRunPlan,
   updateAgentRunState,
   cancelAgentRun,
+  setAgentRunClarification,
+  recordAgentRunClarificationAnswer,
+  stopAgentRun,
 };
