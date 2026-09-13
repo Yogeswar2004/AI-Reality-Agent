@@ -7,6 +7,7 @@ import registry from "./toolRegistry.js";
 import { TOOL_IDS } from "./toolConstants.js";
 import { techIdeaAnalysisDefinition } from "./tools/techIdeaAnalysisAdapter.js";
 import { generateLLMPlan, LLMPlannerError } from "./llmPlanner.js";
+import { generateLLMDecision, LLMDecisionError } from "./llmDecision.js";
 
 class PlannerError extends Error {
   constructor(message, code, statusCode = 400) {
@@ -306,7 +307,266 @@ const generatePlan = ({ goal, location = null }) => {
  * @param {string} params.userId - Authenticated user ID.
  * @returns {Promise<Object>} Structured decision recommendation.
  */
-const evaluateNextStep = async ({ runId, userId }) => {
+/**
+ * Deterministic step evaluation logic (advisory only).
+ * Evaluates progress against planned steps and evidence without LLM calls.
+ *
+ * @param {Object} params
+ * @param {Object} params.run - Agent run document.
+ * @param {Array<Object>} params.steps - Recorded agent steps.
+ * @param {Array<Object>} params.evidenceList - Grounded evidence list.
+ * @returns {Object} Structured decision recommendation.
+ */
+const evaluateDeterministicNextStep = ({ run, steps, evidenceList }) => {
+  const maxSteps = run.budget?.maxSteps || 8;
+  if ((run.stepCount || 0) >= maxSteps) {
+    return {
+      action: "QUOTA_EXHAUSTED",
+      message: "Budget limit reached for this run",
+    };
+  }
+
+  const toolSteps = steps.filter((s) => s.type === "tool_execution");
+  const failedSteps = toolSteps.filter((s) => s.status === "failed");
+  const completedSteps = toolSteps.filter((s) => s.status === "completed");
+
+  if (failedSteps.length > 0) {
+    return {
+      action: "FAIL",
+      reason: "Previous tool step failed",
+      failedStep: failedSteps[failedSteps.length - 1],
+    };
+  }
+
+  const executedToolIds = new Set([
+    ...completedSteps.map((s) => s.input?.toolId),
+    ...evidenceList.map((e) => e.toolId),
+  ]);
+  const nextPlannedStep = run.plan.steps.find(
+    (s) => !executedToolIds.has(s.toolId)
+  );
+
+  if (!nextPlannedStep) {
+    return {
+      action: "TRANSITION_SYNTHESIZING",
+      message: "All planned steps have completed successfully",
+    };
+  }
+
+  // Apply external-call quota guard only when about to recommend an external tool execution
+  const nextToolDef = registry.getTool(nextPlannedStep.toolId);
+  const isExternalTool = Boolean(nextToolDef?.external);
+  if (isExternalTool) {
+    const maxExternalCalls = run.budget?.maxExternalCalls || 5;
+    if ((run.externalCallCount || 0) >= maxExternalCalls) {
+      return {
+        action: "QUOTA_EXHAUSTED",
+        message: "External call budget limit reached for this run",
+      };
+    }
+  }
+
+  // Evidence-derived parameter extraction for next step
+  if (nextPlannedStep.toolId === TOOL_IDS.TECH_IDEA_ANALYSIS) {
+    return {
+      action: "EXECUTE_TOOL",
+      toolId: nextPlannedStep.toolId,
+      input: nextPlannedStep.params,
+      reasoning: nextPlannedStep.description,
+      stepIndex: nextPlannedStep.stepIndex,
+    };
+  }
+
+  if (nextPlannedStep.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH) {
+    return {
+      action: "EXECUTE_TOOL",
+      toolId: nextPlannedStep.toolId,
+      input: nextPlannedStep.params,
+      reasoning: nextPlannedStep.description,
+      stepIndex: nextPlannedStep.stepIndex,
+    };
+  }
+
+  if (nextPlannedStep.toolId === TOOL_IDS.BUSINESS_REVIEWS_SEARCH) {
+    const competitorEvidence = evidenceList.find(
+      (e) =>
+        e.evidenceType === "competitor_discovery" ||
+        e.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH
+    );
+    const searchStep = completedSteps.find(
+      (s) => s.input?.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH
+    );
+
+    if (!competitorEvidence && (!searchStep || !searchStep.output)) {
+      return {
+        action: "FAIL",
+        reason:
+          "Cannot execute business_reviews_search: Prerequisite nearby_business_search output is missing",
+      };
+    }
+
+    const businesses =
+      competitorEvidence?.data?.businesses ?? searchStep?.output?.businesses;
+
+    if (!Array.isArray(businesses) || businesses.length === 0) {
+      return {
+        action: "TRANSITION_SYNTHESIZING",
+        message:
+          "Nearby business search returned zero competitors; skipping review search to avoid fabricating entities and transitioning to synthesis with partial evidence.",
+      };
+    }
+
+    const primaryCompetitor = businesses[0];
+    const businessId =
+      typeof primaryCompetitor?.placeId === "string"
+        ? primaryCompetitor.placeId.trim()
+        : "";
+
+    if (!businessId) {
+      return {
+        action: "FAIL",
+        reason: "Discovered competitor has missing or invalid placeId",
+      };
+    }
+
+    const businessName =
+      typeof primaryCompetitor?.name === "string" &&
+      primaryCompetitor.name.trim()
+        ? primaryCompetitor.name.trim()
+        : undefined;
+
+    const limit =
+      typeof nextPlannedStep.params?.limit === "number"
+        ? nextPlannedStep.params.limit
+        : 5;
+
+    const input = {
+      businessId,
+      limit,
+    };
+    if (businessName) {
+      input.businessName = businessName;
+    }
+
+    return {
+      action: "EXECUTE_TOOL",
+      toolId: TOOL_IDS.BUSINESS_REVIEWS_SEARCH,
+      input,
+      reasoning: businessName
+        ? `Fetch customer reviews for competitor '${businessName}' (${businessId}) discovered from nearby search`
+        : `Fetch customer reviews for competitor (${businessId}) discovered from nearby search`,
+      stepIndex: nextPlannedStep.stepIndex,
+    };
+  }
+
+  if (nextPlannedStep.toolId === TOOL_IDS.REVIEW_SENTIMENT_ANALYZER) {
+    const reviewsEvidence = evidenceList.find(
+      (e) =>
+        e.evidenceType === "customer_reviews" ||
+        e.toolId === TOOL_IDS.BUSINESS_REVIEWS_SEARCH
+    );
+    const reviewsStep = completedSteps.find(
+      (s) => s.input?.toolId === TOOL_IDS.BUSINESS_REVIEWS_SEARCH
+    );
+
+    if (!reviewsEvidence && (!reviewsStep || !reviewsStep.output)) {
+      return {
+        action: "FAIL",
+        reason:
+          "Cannot execute review_sentiment_analyzer: Prerequisite business_reviews_search output is missing",
+      };
+    }
+
+    let businessName = null;
+    if (
+      typeof reviewsEvidence?.data?.businessName === "string" &&
+      reviewsEvidence.data.businessName.trim()
+    ) {
+      businessName = reviewsEvidence.data.businessName.trim();
+    } else if (
+      typeof reviewsStep?.output?.businessName === "string" &&
+      reviewsStep.output.businessName.trim()
+    ) {
+      businessName = reviewsStep.output.businessName.trim();
+    } else if (
+      typeof reviewsStep?.input?.businessName === "string" &&
+      reviewsStep.input.businessName.trim()
+    ) {
+      businessName = reviewsStep.input.businessName.trim();
+    }
+
+    if (!businessName) {
+      return {
+        action: "FAIL",
+        reason:
+          "Cannot execute review_sentiment_analyzer: Required business name evidence is missing from previous steps",
+      };
+    }
+
+    const reviews = Array.isArray(reviewsEvidence?.data?.reviews)
+      ? reviewsEvidence.data.reviews
+      : Array.isArray(reviewsStep?.output?.reviews)
+        ? reviewsStep.output.reviews
+        : [];
+
+    const competitorEvidence = evidenceList.find(
+      (e) =>
+        e.evidenceType === "competitor_discovery" ||
+        e.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH
+    );
+    const searchStep = completedSteps.find(
+      (s) => s.input?.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH
+    );
+
+    const businessType =
+      (typeof competitorEvidence?.metadata?.params?.businessType === "string" &&
+        competitorEvidence.metadata.params.businessType.trim()) ||
+      (typeof searchStep?.input?.businessType === "string" &&
+        searchStep.input.businessType.trim()) ||
+      (typeof nextPlannedStep.params?.businessType === "string"
+        ? nextPlannedStep.params.businessType.trim()
+        : "business");
+
+    return {
+      action: "EXECUTE_TOOL",
+      toolId: TOOL_IDS.REVIEW_SENTIMENT_ANALYZER,
+      input: {
+        businessName,
+        businessType,
+        reviews,
+      },
+      reasoning: `Analyze sentiment, complaints, and unmet needs from ${reviews.length} reviews for '${businessName}'`,
+      stepIndex: nextPlannedStep.stepIndex,
+    };
+  }
+
+  return {
+    action: "EXECUTE_TOOL",
+    toolId: nextPlannedStep.toolId,
+    input: nextPlannedStep.params || {},
+    reasoning: nextPlannedStep.description || "Execute planned tool step",
+    stepIndex: nextPlannedStep.stepIndex,
+  };
+};
+
+/**
+ * Evaluate the next step decision for an agent run (advisory only).
+ * Uses LLM adaptive decision with automatic deterministic fallback.
+ * This function NEVER executes tools, calls toolExecutor, or mutates run state.
+ *
+ * @param {Object} params
+ * @param {string} params.runId - Agent run ID.
+ * @param {string} params.userId - Authenticated user ID.
+ * @param {Object|null} [params.providerClient=null] - Optional Gemini client override.
+ * @param {string|null} [params.model=null] - Optional Gemini model override.
+ * @returns {Promise<Object>} Structured decision recommendation.
+ */
+const evaluateNextStep = async ({
+  runId,
+  userId,
+  providerClient = null,
+  model = null,
+}) => {
   if (!ObjectId.isValid(runId)) {
     throw new PlannerError("Invalid run ID", "INVALID_RUN_ID", 400);
   }
@@ -352,240 +612,35 @@ const evaluateNextStep = async ({ runId, userId }) => {
     };
   }
 
-  // 3. In EXECUTING state: evaluate progress against planned steps
+  // 3. In EXECUTING state: evaluate progress with LLM adaptive decision and deterministic fallback
   if (run.state === AGENT_STATES.EXECUTING) {
-    const maxSteps = run.budget?.maxSteps || 8;
-    if ((run.stepCount || 0) >= maxSteps) {
-      return {
-        action: "QUOTA_EXHAUSTED",
-        message: "Budget limit reached for this run",
-      };
-    }
-
     const steps = await getAgentStepsByRunId({ runId, userId });
     const evidenceList = await getAgentEvidenceByRunId({ runId, userId });
 
-    const toolSteps = steps.filter((s) => s.type === "tool_execution");
-    const failedSteps = toolSteps.filter((s) => s.status === "failed");
-    const completedSteps = toolSteps.filter((s) => s.status === "completed");
-
-    if (failedSteps.length > 0) {
-      return {
-        action: "FAIL",
-        reason: "Previous tool step failed",
-        failedStep: failedSteps[failedSteps.length - 1],
-      };
-    }
-
-    const executedToolIds = new Set([
-      ...completedSteps.map((s) => s.input?.toolId),
-      ...evidenceList.map((e) => e.toolId),
-    ]);
-    const nextPlannedStep = run.plan.steps.find(
-      (s) => !executedToolIds.has(s.toolId)
-    );
-
-    if (!nextPlannedStep) {
-      return {
-        action: "TRANSITION_SYNTHESIZING",
-        message: "All planned steps have completed successfully",
-      };
-    }
-
-    // Apply external-call quota guard only when about to recommend an external tool execution
-    const nextToolDef = registry.getTool(nextPlannedStep.toolId);
-    const isExternalTool = Boolean(nextToolDef?.external);
-    if (isExternalTool) {
-      const maxExternalCalls = run.budget?.maxExternalCalls || 5;
-      if ((run.externalCallCount || 0) >= maxExternalCalls) {
-        return {
-          action: "QUOTA_EXHAUSTED",
-          message: "External call budget limit reached for this run",
-        };
-      }
-    }
-
-    // Evidence-derived parameter extraction for next step
-    if (nextPlannedStep.toolId === TOOL_IDS.TECH_IDEA_ANALYSIS) {
-      return {
-        action: "EXECUTE_TOOL",
-        toolId: nextPlannedStep.toolId,
-        input: nextPlannedStep.params,
-        reasoning: nextPlannedStep.description,
-        stepIndex: nextPlannedStep.stepIndex,
-      };
-    }
-
-    if (nextPlannedStep.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH) {
-      return {
-        action: "EXECUTE_TOOL",
-        toolId: nextPlannedStep.toolId,
-        input: nextPlannedStep.params,
-        reasoning: nextPlannedStep.description,
-        stepIndex: nextPlannedStep.stepIndex,
-      };
-    }
-
-    if (nextPlannedStep.toolId === TOOL_IDS.BUSINESS_REVIEWS_SEARCH) {
-      const competitorEvidence = evidenceList.find(
-        (e) =>
-          e.evidenceType === "competitor_discovery" ||
-          e.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH
+    try {
+      const decision = await generateLLMDecision({
+        run,
+        steps,
+        evidence: evidenceList,
+        providerClient,
+        model,
+      });
+      return decision;
+    } catch (err) {
+      console.warn(
+        `[LLM Decision] Failed to generate adaptive decision via LLM (${err.code || err.name}: ${err.message}). Falling back to deterministic decision.`
       );
-      const searchStep = completedSteps.find(
-        (s) => s.input?.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH
-      );
-
-      if (!competitorEvidence && (!searchStep || !searchStep.output)) {
-        return {
-          action: "FAIL",
-          reason:
-            "Cannot execute business_reviews_search: Prerequisite nearby_business_search output is missing",
-        };
-      }
-
-      const businesses =
-        competitorEvidence?.data?.businesses ?? searchStep?.output?.businesses;
-
-      if (!Array.isArray(businesses) || businesses.length === 0) {
-        return {
-          action: "TRANSITION_SYNTHESIZING",
-          message:
-            "Nearby business search returned zero competitors; skipping review search to avoid fabricating entities and transitioning to synthesis with partial evidence.",
-        };
-      }
-
-      const primaryCompetitor = businesses[0];
-      const businessId =
-        typeof primaryCompetitor?.placeId === "string"
-          ? primaryCompetitor.placeId.trim()
-          : "";
-
-      if (!businessId) {
-        return {
-          action: "FAIL",
-          reason: "Discovered competitor has missing or invalid placeId",
-        };
-      }
-
-      const businessName =
-        typeof primaryCompetitor?.name === "string" &&
-        primaryCompetitor.name.trim()
-          ? primaryCompetitor.name.trim()
-          : undefined;
-
-      const limit =
-        typeof nextPlannedStep.params?.limit === "number"
-          ? nextPlannedStep.params.limit
-          : 5;
-
-      const input = {
-        businessId,
-        limit,
-      };
-      if (businessName) {
-        input.businessName = businessName;
-      }
-
+      const fallbackDecision = evaluateDeterministicNextStep({
+        run,
+        steps,
+        evidenceList,
+      });
       return {
-        action: "EXECUTE_TOOL",
-        toolId: TOOL_IDS.BUSINESS_REVIEWS_SEARCH,
-        input,
-        reasoning: businessName
-          ? `Fetch customer reviews for competitor '${businessName}' (${businessId}) discovered from nearby search`
-          : `Fetch customer reviews for competitor (${businessId}) discovered from nearby search`,
-        stepIndex: nextPlannedStep.stepIndex,
+        ...fallbackDecision,
+        source: "deterministic_fallback",
+        fallbackReason: err.message || "LLM decision unavailable",
       };
     }
-
-    if (nextPlannedStep.toolId === TOOL_IDS.REVIEW_SENTIMENT_ANALYZER) {
-      const reviewsEvidence = evidenceList.find(
-        (e) =>
-          e.evidenceType === "customer_reviews" ||
-          e.toolId === TOOL_IDS.BUSINESS_REVIEWS_SEARCH
-      );
-      const reviewsStep = completedSteps.find(
-        (s) => s.input?.toolId === TOOL_IDS.BUSINESS_REVIEWS_SEARCH
-      );
-
-      if (!reviewsEvidence && (!reviewsStep || !reviewsStep.output)) {
-        return {
-          action: "FAIL",
-          reason:
-            "Cannot execute review_sentiment_analyzer: Prerequisite business_reviews_search output is missing",
-        };
-      }
-
-      let businessName = null;
-      if (
-        typeof reviewsEvidence?.data?.businessName === "string" &&
-        reviewsEvidence.data.businessName.trim()
-      ) {
-        businessName = reviewsEvidence.data.businessName.trim();
-      } else if (
-        typeof reviewsStep?.output?.businessName === "string" &&
-        reviewsStep.output.businessName.trim()
-      ) {
-        businessName = reviewsStep.output.businessName.trim();
-      } else if (
-        typeof reviewsStep?.input?.businessName === "string" &&
-        reviewsStep.input.businessName.trim()
-      ) {
-        businessName = reviewsStep.input.businessName.trim();
-      }
-
-      if (!businessName) {
-        return {
-          action: "FAIL",
-          reason:
-            "Cannot execute review_sentiment_analyzer: Required business name evidence is missing from previous steps",
-        };
-      }
-
-      const reviews = Array.isArray(reviewsEvidence?.data?.reviews)
-        ? reviewsEvidence.data.reviews
-        : Array.isArray(reviewsStep?.output?.reviews)
-          ? reviewsStep.output.reviews
-          : [];
-
-      const competitorEvidence = evidenceList.find(
-        (e) =>
-          e.evidenceType === "competitor_discovery" ||
-          e.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH
-      );
-      const searchStep = completedSteps.find(
-        (s) => s.input?.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH
-      );
-
-      const businessType =
-        (typeof competitorEvidence?.metadata?.params?.businessType === "string" &&
-          competitorEvidence.metadata.params.businessType.trim()) ||
-        (typeof searchStep?.input?.businessType === "string" &&
-          searchStep.input.businessType.trim()) ||
-        (typeof nextPlannedStep.params?.businessType === "string"
-          ? nextPlannedStep.params.businessType.trim()
-          : "business");
-
-      return {
-        action: "EXECUTE_TOOL",
-        toolId: TOOL_IDS.REVIEW_SENTIMENT_ANALYZER,
-        input: {
-          businessName,
-          businessType,
-          reviews,
-        },
-        reasoning: `Analyze sentiment, complaints, and unmet needs from ${reviews.length} reviews for '${businessName}'`,
-        stepIndex: nextPlannedStep.stepIndex,
-      };
-    }
-
-    return {
-      action: "EXECUTE_TOOL",
-      toolId: nextPlannedStep.toolId,
-      input: nextPlannedStep.params || {},
-      reasoning: nextPlannedStep.description || "Execute planned tool step",
-      stepIndex: nextPlannedStep.stepIndex,
-    };
   }
 
   // 4. In SYNTHESIZING state: advisory recommendation to synthesize
@@ -653,6 +708,8 @@ const generatePlanWithFallback = async ({
 export {
   PlannerError,
   LLMPlannerError,
+  LLMDecisionError,
+  evaluateDeterministicNextStep,
   evaluateNextStep,
   generatePlan,
   generatePlanWithFallback,
