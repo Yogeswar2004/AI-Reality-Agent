@@ -43,6 +43,7 @@ const createAgentRun = async ({ userId, goal, location = null }) => {
     error: null,
     cancellationReason: null,
     clarification: null,
+    currentDecision: null,
     startedAt: null,
     completedAt: null,
     plan: null,
@@ -398,6 +399,7 @@ const saveAgentRunFinalOutput = async ({
     state: nextState,
     finalOutput: finalOutput || null,
     error: error || null,
+    currentDecision: null,
     updatedAt: now,
   };
 
@@ -683,6 +685,36 @@ const stopAgentRun = async ({ runId, userId, stopMetadata }) => {
   return serializeAgentRun(updatedRun);
 };
 
+const updateAgentRunCurrentDecision = async ({ runId, userId, currentDecision }) => {
+  if (!ObjectId.isValid(runId)) {
+    return null;
+  }
+
+  const collection = getDB().collection(AGENT_RUNS_COLLECTION);
+  const updatedRun = await collection.findOneAndUpdate(
+    {
+      _id: new ObjectId(runId),
+      userId,
+    },
+    {
+      $set: {
+        currentDecision: currentDecision || null,
+        updatedAt: new Date(),
+      },
+    },
+    {
+      returnDocument: "after",
+      includeResultMetadata: false,
+    }
+  );
+
+  if (!updatedRun) {
+    return null;
+  }
+
+  return serializeAgentRun(updatedRun);
+};
+
 // Indexes for agent_runs
 const initAgentRunIndexes = async () => {
   try {
@@ -714,4 +746,5 @@ export {
   setAgentRunClarification,
   recordAgentRunClarificationAnswer,
   stopAgentRun,
+  updateAgentRunCurrentDecision,
 };

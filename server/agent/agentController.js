@@ -9,6 +9,7 @@ import {
   saveAgentRunFinalOutput,
   setAgentRunClarification,
   stopAgentRun,
+  updateAgentRunCurrentDecision,
   updateAgentRunPlan,
   updateAgentRunState as updateRunState,
 } from "./agentRun.js";
@@ -246,6 +247,23 @@ const executeTool = async (req, res) => {
       );
     }
 
+    if (nextDecision) {
+      const persistedRun = await updateAgentRunCurrentDecision({
+        runId,
+        userId,
+        currentDecision: nextDecision,
+      });
+      if (persistedRun) {
+        updatedRunFromDecision = persistedRun;
+      }
+    } else {
+      await updateAgentRunCurrentDecision({
+        runId,
+        userId,
+        currentDecision: null,
+      });
+    }
+
     return res.status(200).json({
       ...result,
       ...(updatedRunFromDecision ? { run: updatedRunFromDecision } : {}),
@@ -472,6 +490,17 @@ const getNextDecision = async (req, res) => {
       decision,
     });
 
+    if (processed.decision) {
+      const persistedRun = await updateAgentRunCurrentDecision({
+        runId,
+        userId,
+        currentDecision: processed.decision,
+      });
+      if (persistedRun) {
+        processed.run = persistedRun;
+      }
+    }
+
     return res.status(200).json({
       success: true,
       decision: processed.decision,
@@ -532,8 +561,21 @@ const submitClarificationAnswer = async (req, res) => {
     }
 
     let nextDecision = null;
+    let updatedRunFromDecision = updatedRun;
     try {
       nextDecision = await evaluateNextStep({ runId, userId });
+      if (nextDecision) {
+        const processed = await processAdvisoryDecision({
+          runId,
+          userId,
+          run: updatedRun,
+          decision: nextDecision,
+        });
+        nextDecision = processed.decision;
+        if (processed.run) {
+          updatedRunFromDecision = processed.run;
+        }
+      }
     } catch (evalErr) {
       console.warn(
         "Could not evaluate next decision after clarification answer:",
@@ -541,11 +583,28 @@ const submitClarificationAnswer = async (req, res) => {
       );
     }
 
+    if (nextDecision) {
+      const persistedRun = await updateAgentRunCurrentDecision({
+        runId,
+        userId,
+        currentDecision: nextDecision,
+      });
+      if (persistedRun) {
+        updatedRunFromDecision = persistedRun;
+      }
+    } else {
+      await updateAgentRunCurrentDecision({
+        runId,
+        userId,
+        currentDecision: null,
+      });
+    }
+
     return res.status(200).json({
       success: true,
-      run: updatedRun,
+      run: updatedRunFromDecision,
       nextDecision,
-      validNextStates: getValidNextStates(updatedRun.state),
+      validNextStates: getValidNextStates(updatedRunFromDecision.state),
     });
   } catch (error) {
     if (error instanceof AgentRunStateError) {
@@ -602,8 +661,21 @@ const approveRunPlan = async (req, res) => {
     });
 
     let nextDecision = null;
+    let updatedRunFromDecision = updatedRun;
     try {
       nextDecision = await evaluateNextStep({ runId, userId });
+      if (nextDecision) {
+        const processed = await processAdvisoryDecision({
+          runId,
+          userId,
+          run: updatedRun,
+          decision: nextDecision,
+        });
+        nextDecision = processed.decision;
+        if (processed.run) {
+          updatedRunFromDecision = processed.run;
+        }
+      }
     } catch (evalErr) {
       console.warn(
         "Could not evaluate next decision after plan approval:",
@@ -611,9 +683,20 @@ const approveRunPlan = async (req, res) => {
       );
     }
 
+    if (nextDecision) {
+      const persistedRun = await updateAgentRunCurrentDecision({
+        runId,
+        userId,
+        currentDecision: nextDecision,
+      });
+      if (persistedRun) {
+        updatedRunFromDecision = persistedRun;
+      }
+    }
+
     return res.status(200).json({
       success: true,
-      run: updatedRun,
+      run: updatedRunFromDecision,
       nextDecision,
     });
   } catch (error) {
@@ -907,26 +990,49 @@ const getAgentRunStatus = async (req, res) => {
     const steps = await getAgentStepsByRunId({ runId, userId });
 
     let nextDecision = null;
-    if (run.plan) {
-      try {
-        nextDecision = await evaluateNextStep({ runId, userId });
-      } catch (evalErr) {
-        console.warn(
-          "Could not evaluate next decision for run status:",
-          evalErr?.message
-        );
-      }
+    if (run.state === AGENT_STATES.AWAITING_CLARIFICATION && run.clarification) {
+      nextDecision = {
+        action: "ASK_USER",
+        question: run.clarification.question,
+        options: run.clarification.options || [],
+        reasoning:
+          run.currentDecision?.reasoning ||
+          "Awaiting user response to clarifying question",
+        source: run.currentDecision?.source || "persisted_clarification",
+      };
+    } else if (
+      run.state === AGENT_STATES.CANCELLED &&
+      run.cancellationReason?.type === "agent_stop"
+    ) {
+      nextDecision = {
+        action: "STOP",
+        reason:
+          run.cancellationReason.reason ||
+          "Agent concluded research goals satisfied",
+        summary: run.cancellationReason.summary || null,
+        source: "persisted_stop",
+      };
+    } else if (
+      run.state === AGENT_STATES.EXECUTING ||
+      run.state === AGENT_STATES.SYNTHESIZING
+    ) {
+      nextDecision = run.currentDecision || null;
     }
 
     return res.status(200).json({
       success: true,
       runId: run._id,
+      _id: run._id,
+      goal: run.goal,
+      location: run.location,
       state: run.state,
       stepCount: run.stepCount,
       externalCallCount: run.externalCallCount,
+      synthesisCallCount: run.synthesisCallCount,
       budget: run.budget,
       plan: run.plan,
       hasFinalOutput: Boolean(run.finalOutput),
+      finalOutput: run.finalOutput,
       stepSummary: {
         total: steps.length,
         completed: steps.filter((s) => s.status === "completed").length,
@@ -934,6 +1040,7 @@ const getAgentRunStatus = async (req, res) => {
         running: steps.filter((s) => s.status === "running").length,
       },
       nextDecision,
+      currentDecision: run.currentDecision || null,
       validNextStates: getValidNextStates(run.state),
       clarification: run.clarification || null,
       completedAt: run.completedAt,

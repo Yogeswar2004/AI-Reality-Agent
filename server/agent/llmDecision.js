@@ -1389,7 +1389,7 @@ const generateLLMDecision = async ({
   // 4. Call Gemini with strict JSON mode
   let responseText;
   try {
-    const selectedModel = model || "gemini-3.5-flash";
+    const selectedModel = model || process.env.GEMINI_MODEL || "gemini-2.5-flash";
     const response = await client.models.generateContent({
       model: selectedModel,
       contents: promptContent,
@@ -1398,6 +1398,8 @@ const generateLLMDecision = async ({
         temperature: 0.1,
         responseMimeType: "application/json",
         responseSchema,
+        abortSignal: AbortSignal.timeout(30000),
+        httpOptions: { timeout: 30000 },
       },
     });
     responseText = response?.text;

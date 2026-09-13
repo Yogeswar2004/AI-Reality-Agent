@@ -238,11 +238,13 @@ for (
 
     response =
       await gemini.models.generateContent({
-        model: "gemini-3.5-flash",
+        model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
 
         contents: prompt,
 
         config: {
+          abortSignal: AbortSignal.timeout(30000),
+          httpOptions: { timeout: 30000 },
           responseMimeType:
             "application/json",
 

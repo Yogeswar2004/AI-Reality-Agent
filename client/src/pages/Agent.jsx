@@ -67,6 +67,33 @@ function Agent() {
     }
   };
 
+  // Restore active run on page load / browser refresh
+  useEffect(() => {
+    const savedRunId = localStorage.getItem("active_agent_run_id");
+    if (savedRunId && !run) {
+      const restoreRun = async () => {
+        try {
+          const runRes = await api.get(`/agent/runs/${savedRunId}`);
+          if (runRes.data?.run) {
+            const fetchedRun = runRes.data.run;
+            setRun(fetchedRun);
+            if (fetchedRun.goal) setGoal(fetchedRun.goal);
+            if (fetchedRun.location) setLocation(fetchedRun.location);
+            if (fetchedRun.plan) setPlan(fetchedRun.plan);
+            if (fetchedRun.finalOutput) setFinalOutput(fetchedRun.finalOutput);
+            if (fetchedRun.currentDecision) setNextDecision(fetchedRun.currentDecision);
+            await fetchSteps(savedRunId);
+            await refreshStatus(savedRunId);
+          }
+        } catch (err) {
+          console.warn("Could not restore active run from storage:", err?.message);
+          localStorage.removeItem("active_agent_run_id");
+        }
+      };
+      restoreRun();
+    }
+  }, []);
+
   // Refresh status from backend
   const refreshStatus = async (runId) => {
     try {
@@ -75,6 +102,9 @@ function Agent() {
         const data = response.data;
         setRun((prev) => ({
           ...prev,
+          _id: data._id || data.runId || prev?._id,
+          goal: data.goal || prev?.goal,
+          location: data.location !== undefined ? data.location : prev?.location,
           state: data.state,
           stepCount: data.stepCount,
           externalCallCount: data.externalCallCount,
@@ -84,9 +114,12 @@ function Agent() {
           cancellationReason: data.cancellationReason,
           error: data.error,
           clarification: data.clarification !== undefined ? data.clarification : prev?.clarification,
+          currentDecision: data.currentDecision !== undefined ? data.currentDecision : prev?.currentDecision,
+          finalOutput: data.finalOutput || prev?.finalOutput,
         }));
         if (data.plan) setPlan(data.plan);
-        if (data.nextDecision) setNextDecision(data.nextDecision);
+        if (data.finalOutput) setFinalOutput(data.finalOutput);
+        if (data.nextDecision !== undefined) setNextDecision(data.nextDecision);
       }
     } catch (statusErr) {
       console.warn("Could not refresh status:", statusErr?.message);
@@ -121,6 +154,7 @@ function Agent() {
 
       setPlan(updatedPlan);
       setRun(updatedRun);
+      localStorage.setItem("active_agent_run_id", newRun._id);
       await fetchSteps(newRun._id);
     } catch (err) {
       setError(
@@ -268,6 +302,7 @@ function Agent() {
 
   // --- Reset to Start New Run ---
   const handleStartNewRun = () => {
+    localStorage.removeItem("active_agent_run_id");
     setRun(null);
     setPlan(null);
     setSteps([]);
