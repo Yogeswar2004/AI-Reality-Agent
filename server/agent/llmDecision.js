@@ -161,7 +161,7 @@ Your role is to evaluate the user's venture goal, approved plan, completed steps
 
 CRITICAL ARCHITECTURAL CONSTRAINTS:
 1. TOOL REGISTRY WHITELIST: If recommending EXECUTE_TOOL (or RUN_TOOL), toolId MUST be selected ONLY from the catalog of available registered tools. You MUST NOT invent, guess, hallucinate, or alter tool IDs.
-2. EVIDENCE-GROUNDED PARAMETERS: All tool input parameters MUST be strictly derived from the approved plan or accumulated step evidence. NEVER fabricate entity IDs, competitor placeIds, business names, or review texts. For business_reviews_search, businessId MUST be one of the verified placeId values discovered in previous competitor discovery evidence.
+2. EVIDENCE-GROUNDED PARAMETERS: All tool input parameters MUST be strictly derived from the approved plan or accumulated step evidence. NEVER fabricate entity IDs, competitor placeIds, business names, or review texts. For business_reviews_search, businessId MUST be one of the verified placeId values discovered in previous competitor discovery evidence across any completed search.
 3. ADAPTIVE TOOL REPETITION: You may recommend a registered tool again if parameters differ meaningfully (e.g. expanding search radius from 1000m to 3000m when competitor density is insufficient). You MUST NOT repeat the exact same tool with identical parameters. A single tool may not be executed more than 3 times total per run.
 4. EARLY SYNTHESIS: If accumulated evidence is already sufficient to address the user's venture goal, you may recommend TRANSITION_SYNTHESIZING (or SYNTHESIZE) early, even if planned steps remain.
 5. ASKING CLARIFICATIONS: If critical information is missing from the goal to proceed meaningfully, you may recommend ASK_USER with a clear question and options.
@@ -217,11 +217,24 @@ const formatDecisionPromptContext = ({
     };
   });
 
-  // Compact summary of grounded evidence
+  // Compact summary of grounded evidence across all execution steps
   const evidenceSummary = evidence.map((e) => {
     const item = {
+      ...(typeof e.metadata?.stepNumber === "number"
+        ? { stepNumber: e.metadata.stepNumber }
+        : {}),
+      ...(e.stepId ? { stepId: String(e.stepId) } : {}),
       toolId: e.toolId,
       evidenceType: e.evidenceType,
+      ...(e.provider ? { provider: e.provider } : {}),
+      ...(e.retrievedAt
+        ? {
+            retrievedAt:
+              e.retrievedAt instanceof Date
+                ? e.retrievedAt.toISOString()
+                : String(e.retrievedAt),
+          }
+        : {}),
     };
 
     if (e.evidenceType === "competitor_discovery") {
@@ -229,6 +242,14 @@ const formatDecisionPromptContext = ({
         ? e.data.businesses
         : [];
       item.totalFound = e.data?.totalFound ?? businesses.length;
+      if (e.data?.searchRadius !== undefined) {
+        item.searchRadius = e.data.searchRadius;
+      } else if (e.metadata?.params?.radius !== undefined) {
+        item.searchRadius = e.metadata.params.radius;
+      }
+      if (e.metadata?.params?.businessType) {
+        item.businessType = String(e.metadata.params.businessType);
+      }
       item.discoveredCompetitors = businesses.slice(0, 5).map((b) => ({
         placeId: b.placeId,
         name: b.name,
@@ -239,6 +260,9 @@ const formatDecisionPromptContext = ({
       item.businessId = e.data?.businessId;
       item.businessName = e.data?.businessName;
       item.totalReviews = e.data?.totalReviews;
+      if (e.metadata?.params?.limit !== undefined) {
+        item.limit = e.metadata.params.limit;
+      }
       const reviews = Array.isArray(e.data?.reviews) ? e.data.reviews : [];
       item.sampleReviews = reviews.slice(0, 3).map((r) => ({
         rating: r.rating,
@@ -458,20 +482,33 @@ const validateDecisionSchema = (decision, options = {}) => {
 
     // Evidence Grounding Firewall for business_reviews_search
     if (cleanToolId === TOOL_IDS.BUSINESS_REVIEWS_SEARCH) {
-      const competitorEvidence = evidence.find(
+      const competitorEvidenceList = evidence.filter(
         (e) =>
-          e.evidenceType === "competitor_discovery" ||
-          e.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH
+          (e.evidenceType === "competitor_discovery" ||
+            e.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH) &&
+          e.status !== "contradicted" &&
+          e.status !== "stale"
       );
-      const searchStep = steps.find((s) => {
+      const searchSteps = steps.filter((s) => {
+        if (s.status === "failed") return false;
         const { toolId: sToolId } = extractStepToolIdAndParams(s);
         return sToolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH;
       });
 
-      const businesses =
-        competitorEvidence?.data?.businesses ?? searchStep?.output?.businesses;
+      // Pool businesses across ALL competitor discovery evidence and search steps
+      const allDiscoveredBusinesses = [];
+      for (const e of competitorEvidenceList) {
+        if (Array.isArray(e.data?.businesses)) {
+          allDiscoveredBusinesses.push(...e.data.businesses);
+        }
+      }
+      for (const s of searchSteps) {
+        if (Array.isArray(s.output?.businesses)) {
+          allDiscoveredBusinesses.push(...s.output.businesses);
+        }
+      }
 
-      if (!Array.isArray(businesses) || businesses.length === 0) {
+      if (allDiscoveredBusinesses.length === 0) {
         throw new LLMDecisionError(
           "Cannot execute business_reviews_search: zero competitors discovered in nearby search",
           "ZERO_COMPETITORS_DETECTED",
@@ -480,7 +517,7 @@ const validateDecisionSchema = (decision, options = {}) => {
       }
 
       const validPlaceIds = new Set(
-        businesses
+        allDiscoveredBusinesses
           .map((b) =>
             typeof b?.placeId === "string" ? b.placeId.trim() : null
           )
@@ -977,20 +1014,42 @@ const getMockDecision = ({
 
   // Business reviews search
   if (nextPlannedStep.toolId === TOOL_IDS.BUSINESS_REVIEWS_SEARCH) {
-    const competitorEvidence = evidence.find(
+    const competitorEvidenceList = evidence.filter(
       (e) =>
-        e.evidenceType === "competitor_discovery" ||
-        e.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH
+        (e.evidenceType === "competitor_discovery" ||
+          e.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH) &&
+        e.status !== "contradicted" &&
+        e.status !== "stale"
     );
-    const searchStep = completedSteps.find((s) => {
+    const searchSteps = completedSteps.filter((s) => {
       const { toolId: sToolId } = extractStepToolIdAndParams(s);
       return sToolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH;
     });
 
-    const businesses =
-      competitorEvidence?.data?.businesses ?? searchStep?.output?.businesses;
+    const allDiscoveredBusinesses = [];
+    for (const e of competitorEvidenceList) {
+      if (Array.isArray(e.data?.businesses)) {
+        allDiscoveredBusinesses.push(...e.data.businesses);
+      }
+    }
+    for (const s of searchSteps) {
+      if (Array.isArray(s.output?.businesses)) {
+        allDiscoveredBusinesses.push(...s.output.businesses);
+      }
+    }
 
-    if (!Array.isArray(businesses) || businesses.length === 0) {
+    // Deduplicate preserving order
+    const seenPlaceIds = new Set();
+    const businesses = [];
+    for (const b of allDiscoveredBusinesses) {
+      const pId = typeof b?.placeId === "string" ? b.placeId.trim() : null;
+      if (pId && !seenPlaceIds.has(pId)) {
+        seenPlaceIds.add(pId);
+        businesses.push(b);
+      }
+    }
+
+    if (businesses.length === 0) {
       return validateDecisionSchema(
         {
           action: "TRANSITION_SYNTHESIZING",
@@ -1053,15 +1112,21 @@ const getMockDecision = ({
 
   // Review sentiment analyzer
   if (nextPlannedStep.toolId === TOOL_IDS.REVIEW_SENTIMENT_ANALYZER) {
-    const reviewsEvidence = evidence.find(
+    const allReviewsEvidence = evidence.filter(
       (e) =>
-        e.evidenceType === "customer_reviews" ||
-        e.toolId === TOOL_IDS.BUSINESS_REVIEWS_SEARCH
+        (e.evidenceType === "customer_reviews" ||
+          e.toolId === TOOL_IDS.BUSINESS_REVIEWS_SEARCH) &&
+        e.status !== "contradicted" &&
+        e.status !== "stale"
     );
     const reviewsStep = completedSteps.find((s) => {
       const { toolId: sToolId } = extractStepToolIdAndParams(s);
       return sToolId === TOOL_IDS.BUSINESS_REVIEWS_SEARCH;
     });
+
+    const reviewsEvidence = allReviewsEvidence.length > 0
+      ? allReviewsEvidence[allReviewsEvidence.length - 1]
+      : null;
 
     if (!reviewsEvidence && (!reviewsStep || !reviewsStep.output)) {
       return validateDecisionSchema(

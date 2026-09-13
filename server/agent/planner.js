@@ -388,16 +388,18 @@ const evaluateDeterministicNextStep = ({ run, steps, evidenceList }) => {
   }
 
   if (nextPlannedStep.toolId === TOOL_IDS.BUSINESS_REVIEWS_SEARCH) {
-    const competitorEvidence = evidenceList.find(
+    const competitorEvidenceList = evidenceList.filter(
       (e) =>
-        e.evidenceType === "competitor_discovery" ||
-        e.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH
+        (e.evidenceType === "competitor_discovery" ||
+          e.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH) &&
+        e.status !== "contradicted" &&
+        e.status !== "stale"
     );
-    const searchStep = completedSteps.find(
+    const searchSteps = completedSteps.filter(
       (s) => s.input?.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH
     );
 
-    if (!competitorEvidence && (!searchStep || !searchStep.output)) {
+    if (competitorEvidenceList.length === 0 && searchSteps.length === 0) {
       return {
         action: "FAIL",
         reason:
@@ -405,10 +407,30 @@ const evaluateDeterministicNextStep = ({ run, steps, evidenceList }) => {
       };
     }
 
-    const businesses =
-      competitorEvidence?.data?.businesses ?? searchStep?.output?.businesses;
+    const allDiscoveredBusinesses = [];
+    for (const e of competitorEvidenceList) {
+      if (Array.isArray(e.data?.businesses)) {
+        allDiscoveredBusinesses.push(...e.data.businesses);
+      }
+    }
+    for (const s of searchSteps) {
+      if (Array.isArray(s.output?.businesses)) {
+        allDiscoveredBusinesses.push(...s.output.businesses);
+      }
+    }
 
-    if (!Array.isArray(businesses) || businesses.length === 0) {
+    // Deduplicate by verified placeId
+    const seenPlaceIds = new Set();
+    const businesses = [];
+    for (const b of allDiscoveredBusinesses) {
+      const pId = typeof b?.placeId === "string" ? b.placeId.trim() : null;
+      if (pId && !seenPlaceIds.has(pId)) {
+        seenPlaceIds.add(pId);
+        businesses.push(b);
+      }
+    }
+
+    if (businesses.length === 0) {
       return {
         action: "TRANSITION_SYNTHESIZING",
         message:
@@ -460,14 +482,23 @@ const evaluateDeterministicNextStep = ({ run, steps, evidenceList }) => {
   }
 
   if (nextPlannedStep.toolId === TOOL_IDS.REVIEW_SENTIMENT_ANALYZER) {
-    const reviewsEvidence = evidenceList.find(
+    const allReviewsEvidence = evidenceList.filter(
       (e) =>
-        e.evidenceType === "customer_reviews" ||
-        e.toolId === TOOL_IDS.BUSINESS_REVIEWS_SEARCH
+        (e.evidenceType === "customer_reviews" ||
+          e.toolId === TOOL_IDS.BUSINESS_REVIEWS_SEARCH) &&
+        e.status !== "contradicted" &&
+        e.status !== "stale"
     );
-    const reviewsStep = completedSteps.find(
+    const allReviewsSteps = completedSteps.filter(
       (s) => s.input?.toolId === TOOL_IDS.BUSINESS_REVIEWS_SEARCH
     );
+
+    const reviewsEvidence = allReviewsEvidence.length > 0
+      ? allReviewsEvidence[allReviewsEvidence.length - 1]
+      : null;
+    const reviewsStep = allReviewsSteps.length > 0
+      ? allReviewsSteps[allReviewsSteps.length - 1]
+      : null;
 
     if (!reviewsEvidence && (!reviewsStep || !reviewsStep.output)) {
       return {
@@ -509,11 +540,14 @@ const evaluateDeterministicNextStep = ({ run, steps, evidenceList }) => {
         ? reviewsStep.output.reviews
         : [];
 
-    const competitorEvidence = evidenceList.find(
+    const allCompetitorEvidence = evidenceList.filter(
       (e) =>
         e.evidenceType === "competitor_discovery" ||
         e.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH
     );
+    const competitorEvidence = allCompetitorEvidence.length > 0
+      ? allCompetitorEvidence[allCompetitorEvidence.length - 1]
+      : null;
     const searchStep = completedSteps.find(
       (s) => s.input?.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH
     );

@@ -68,20 +68,7 @@ const synthesizeFinalRecommendation = ({ run, steps = [], evidence = [] }) => {
     error: s.error || "Tool execution failed",
   }));
 
-  // Determine if synthesis is partial based on plan or failed tools
-  const plannedSteps = Array.isArray(run.plan?.steps) ? run.plan.steps : [];
-  const plannedToolIds = plannedSteps.map((s) => s.toolId);
-
-  let partial = false;
-  if (failedTools.length > 0) {
-    partial = true;
-  } else if (plannedToolIds.length > 0 && successfulTools.length < plannedToolIds.length) {
-    partial = true;
-  } else if (toolSteps.length === 0 && safeEvidence.length === 0) {
-    partial = true;
-  }
-
-  // 2. Locate evidence objects (or fallback to completed step outputs)
+  // 2. Locate evidence objects across all execution steps
   const techEvidence = safeEvidence.find(
     (e) => e.evidenceType === "tech_assessment" || e.toolId === "tech_idea_analysis"
   );
@@ -89,26 +76,59 @@ const synthesizeFinalRecommendation = ({ run, steps = [], evidence = [] }) => {
     (s) => s.input?.toolId === "tech_idea_analysis"
   );
 
-  const nearbyEvidence = safeEvidence.find(
-    (e) => e.evidenceType === "competitor_discovery" || e.toolId === "nearby_business_search"
+  const allNearbyEvidence = safeEvidence.filter(
+    (e) =>
+      (e.evidenceType === "competitor_discovery" ||
+        e.toolId === "nearby_business_search") &&
+      e.status !== "contradicted" &&
+      e.status !== "stale"
   );
-  const nearbyStep = completedToolSteps.find(
+  const allNearbySteps = completedToolSteps.filter(
     (s) => s.input?.toolId === "nearby_business_search"
   );
 
-  const reviewsEvidence = safeEvidence.find(
-    (e) => e.evidenceType === "customer_reviews" || e.toolId === "business_reviews_search"
+  const allReviewsEvidence = safeEvidence.filter(
+    (e) =>
+      (e.evidenceType === "customer_reviews" ||
+        e.toolId === "business_reviews_search") &&
+      e.status !== "contradicted" &&
+      e.status !== "stale"
   );
-  const reviewsStep = completedToolSteps.find(
+  const allReviewsSteps = completedToolSteps.filter(
     (s) => s.input?.toolId === "business_reviews_search"
   );
 
-  const sentimentEvidence = safeEvidence.find(
-    (e) => e.evidenceType === "sentiment_analysis" || e.toolId === "review_sentiment_analyzer"
+  const allSentimentEvidence = safeEvidence.filter(
+    (e) =>
+      (e.evidenceType === "sentiment_analysis" ||
+        e.toolId === "review_sentiment_analyzer") &&
+      e.status !== "contradicted" &&
+      e.status !== "stale"
   );
-  const sentimentStep = completedToolSteps.find(
+  const allSentimentSteps = completedToolSteps.filter(
     (s) => s.input?.toolId === "review_sentiment_analyzer"
   );
+
+  const nearbyEvidence = allNearbyEvidence.length > 0
+    ? allNearbyEvidence[allNearbyEvidence.length - 1]
+    : null;
+  const nearbyStep = allNearbySteps.length > 0
+    ? allNearbySteps[allNearbySteps.length - 1]
+    : null;
+
+  const reviewsEvidence = allReviewsEvidence.length > 0
+    ? allReviewsEvidence[allReviewsEvidence.length - 1]
+    : null;
+  const reviewsStep = allReviewsSteps.length > 0
+    ? allReviewsSteps[allReviewsSteps.length - 1]
+    : null;
+
+  const sentimentEvidence = allSentimentEvidence.length > 0
+    ? allSentimentEvidence[allSentimentEvidence.length - 1]
+    : null;
+  const sentimentStep = allSentimentSteps.length > 0
+    ? allSentimentSteps[allSentimentSteps.length - 1]
+    : null;
 
   let feasibility = "Unknown";
   let suggestedStack = [];
@@ -144,21 +164,45 @@ const synthesizeFinalRecommendation = ({ run, steps = [], evidence = [] }) => {
   let totalCompetitorReviews = 0;
   let discoveredBusinesses = [];
 
+  // Deduplicate discovered businesses across all competitor discovery records and steps by placeId
+  const discoveredBusinessesMap = new Map();
+  for (const ne of allNearbyEvidence) {
+    if (Array.isArray(ne.data?.businesses)) {
+      for (const b of ne.data.businesses) {
+        const placeId = typeof b?.placeId === "string" ? b.placeId.trim() : null;
+        if (placeId && !discoveredBusinessesMap.has(placeId)) {
+          discoveredBusinessesMap.set(placeId, b);
+        }
+      }
+    }
+  }
+  for (const ns of allNearbySteps) {
+    if (Array.isArray(ns.output?.businesses)) {
+      for (const b of ns.output.businesses) {
+        const placeId = typeof b?.placeId === "string" ? b.placeId.trim() : null;
+        if (placeId && !discoveredBusinessesMap.has(placeId)) {
+          discoveredBusinessesMap.set(placeId, b);
+        }
+      }
+    }
+  }
+  discoveredBusinesses = Array.from(discoveredBusinessesMap.values());
+
   const nearbyData = nearbyEvidence?.data ?? nearbyStep?.output;
-  if (nearbyData && typeof nearbyData === "object") {
-    if (typeof nearbyData.totalFound === "number" && Array.isArray(nearbyData.businesses)) {
-      hasValidNearbyEvidence = true;
-      competitorCount = nearbyData.totalFound;
-      discoveredBusinesses = nearbyData.businesses;
-      if (nearbyData.density && typeof nearbyData.density === "object") {
-        competitorDensity = { ...nearbyData.density };
-      }
-      if (typeof nearbyData.averageRating === "number" && isFinite(nearbyData.averageRating)) {
-        averageCompetitorRating = nearbyData.averageRating;
-      }
-      if (typeof nearbyData.totalReviews === "number" && isFinite(nearbyData.totalReviews)) {
-        totalCompetitorReviews = nearbyData.totalReviews;
-      }
+  if (allNearbyEvidence.length > 0 || allNearbySteps.length > 0) {
+    hasValidNearbyEvidence = true;
+    competitorCount = discoveredBusinesses.length;
+    if (typeof nearbyData?.totalFound === "number") {
+      competitorCount = Math.max(competitorCount, nearbyData.totalFound);
+    }
+    if (nearbyData?.density && typeof nearbyData.density === "object") {
+      competitorDensity = { ...nearbyData.density };
+    }
+    if (typeof nearbyData?.averageRating === "number" && isFinite(nearbyData.averageRating)) {
+      averageCompetitorRating = nearbyData.averageRating;
+    }
+    if (typeof nearbyData?.totalReviews === "number" && isFinite(nearbyData.totalReviews)) {
+      totalCompetitorReviews = nearbyData.totalReviews;
     }
   }
 
@@ -248,6 +292,31 @@ const synthesizeFinalRecommendation = ({ run, steps = [], evidence = [] }) => {
 
   if (integrityRisk) {
     keyRisks.push(integrityRisk);
+  }
+
+  // Determine if synthesis is partial based on evidence completeness and execution integrity
+  const hasValidTechEvidence = Boolean(
+    techData && typeof techData === "object"
+  );
+
+  let partial = false;
+  if (failedTools.length > 0) {
+    partial = true;
+  } else if (integrityRisk) {
+    partial = true;
+  } else if (toolSteps.length === 0 && safeEvidence.length === 0) {
+    partial = true;
+  } else if (
+    hasValidNearbyEvidence &&
+    competitorCount > 0 &&
+    (!hasValidReviewsEvidence || !hasValidSentimentEvidence)
+  ) {
+    // Genuinely incomplete local investigation: competitors exist, but reviews or sentiment were never collected
+    partial = true;
+  } else if (!hasValidNearbyEvidence && !hasValidTechEvidence) {
+    // No valid domain evidence collected
+    partial = true;
+  } else if (hasValidTechEvidence && (feasibility === "Unknown" || marketFitScore === null)) {
     partial = true;
   }
 
