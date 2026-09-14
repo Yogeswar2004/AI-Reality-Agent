@@ -16,6 +16,10 @@ import reviewSentimentAdapter, {
 } from "./tools/reviewSentimentAdapter.js";
 import { classifyProviderError } from "./providerErrors.js";
 import { resolveModel, getFallbackModel } from "./modelResolver.js";
+import {
+  formatMemoriesForPrompt,
+  retrieveRelevantMemories,
+} from "./agentMemory.js";
 
 const ensureDefaultTools = () => {
   const defaultTools = [
@@ -205,6 +209,7 @@ const formatDecisionPromptContext = ({
   steps = [],
   evidence = [],
   tools = null,
+  memories = [],
 }) => {
   const safeTools = formatToolsForPrompt(tools);
 
@@ -312,6 +317,9 @@ ${run.clarification.answeredAt ? `Answered At: ${run.clarification.answeredAt in
 </user_clarifications>\n`
       : "";
 
+  const memoriesBlock = formatMemoriesForPrompt(memories);
+  const memoriesContext = memoriesBlock ? `\n${memoriesBlock}\n` : "";
+
   return `
 <available_tools>
 ${JSON.stringify(safeTools, null, 2)}
@@ -340,7 +348,7 @@ ${JSON.stringify(evidenceSummary, null, 2)}
 Goal: ${run?.goal || ""}
 Location: ${run?.location || "Not specified / Global"}
 </user_goal>
-${clarificationContext}
+${clarificationContext}${memoriesContext}
 Evaluate the current state and recommend the single next advisory action (EXECUTE_TOOL, RUN_TOOL, TRANSITION_SYNTHESIZING, SYNTHESIZE, ASK_USER, STOP, FAIL, or QUOTA_EXHAUSTED).`;
 };
 
@@ -1314,6 +1322,7 @@ const generateLLMDecision = async ({
   providerClient = null,
   model = null,
   mockScenario = null,
+  memories = null,
 }) => {
   if (!run || typeof run !== "object") {
     throw new LLMDecisionError("Agent run object is required", "INVALID_RUN", 400);
@@ -1403,11 +1412,30 @@ const generateLLMDecision = async ({
   }
 
   // 3. Format prompt context
+  let activeMemories = memories;
+  if (activeMemories === null && run?.userId) {
+    try {
+      activeMemories = await retrieveRelevantMemories({
+        userId: run.userId,
+        goal: run.goal,
+        location: run.location,
+        ventureType: run.plan?.ventureType || run.plan?.category || null,
+      });
+    } catch (memErr) {
+      console.warn(
+        "Could not retrieve agent memories for decision prompt:",
+        memErr?.message
+      );
+      activeMemories = [];
+    }
+  }
+
   const promptContent = formatDecisionPromptContext({
     run,
     steps,
     evidence,
     tools,
+    memories: activeMemories || [],
   });
 
   const responseSchema = {

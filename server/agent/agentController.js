@@ -35,6 +35,12 @@ import {
   getAgentEvidenceByRunId,
 } from "./agentEvidence.js";
 import { classifyProviderError } from "./providerErrors.js";
+import {
+  retrieveRelevantMemories,
+  distillMemoriesFromCompletedRun,
+  recordClarificationMemory,
+  recordStopMemory,
+} from "./agentMemory.js";
 
 const createAgentRun = async (req, res) => {
   try {
@@ -195,6 +201,17 @@ const processAdvisoryDecision = async ({ runId, userId, run, decision }) => {
         userId,
         stopMetadata,
       });
+
+      // Distill controlled stop memory
+      try {
+        await recordStopMemory({
+          run: updatedRun,
+          decision,
+        });
+      } catch (memErr) {
+        console.warn("Failed to record stop memory:", memErr?.message);
+      }
+
       return { decision, run: updatedRun };
     }
   }
@@ -422,11 +439,25 @@ const generateRunPlan = async (req, res) => {
       });
     }
 
-    // 2. Call advisory planner to generate plan object (LLM-driven with deterministic fallback)
+    // 2. Retrieve relevant historical memories and call advisory planner
+    let memories = [];
+    try {
+      memories = await retrieveRelevantMemories({
+        userId,
+        goal: run.goal,
+        location: run.location,
+      });
+    } catch (memErr) {
+      console.warn(
+        "Could not retrieve agent memories for plan generation:",
+        memErr?.message
+      );
+    }
+
     const plan = await generatePlanWithFallback({
       goal: run.goal,
       location: run.location,
-      budget: run.budget,
+      budget: { ...run.budget, memories },
       runId,
       userId,
     });
@@ -651,6 +682,17 @@ const submitClarificationAnswer = async (req, res) => {
         code: "RUN_NOT_FOUND",
         message: "Agent run not found or access denied",
       });
+    }
+
+    // Distill clarification memory (user_preference)
+    try {
+      await recordClarificationMemory({
+        run: updatedRun,
+        question: updatedRun.clarification?.question,
+        answer: answer.trim(),
+      });
+    } catch (memErr) {
+      console.warn("Failed to record clarification memory:", memErr?.message);
     }
 
     let nextDecision = null;
@@ -943,6 +985,21 @@ const synthesizeRunOutput = async (req, res) => {
       finalOutput,
       nextState: AGENT_STATES.COMPLETED,
     });
+
+    // 7. Distill curated persistent memories from completed run
+    try {
+      await distillMemoriesFromCompletedRun({
+        run: completedRun,
+        finalOutput,
+        steps: existingSteps,
+        evidence: existingEvidence,
+      });
+    } catch (memErr) {
+      console.warn(
+        "Failed to distill memories from completed run:",
+        memErr?.message
+      );
+    }
 
     return res.status(200).json({
       success: true,

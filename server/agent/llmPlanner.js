@@ -16,6 +16,7 @@ import reviewSentimentAdapter, {
 } from "./tools/reviewSentimentAdapter.js";
 import { classifyProviderError } from "./providerErrors.js";
 import { resolveModel, getFallbackModel } from "./modelResolver.js";
+import { formatMemoriesForPrompt } from "./agentMemory.js";
 
 const ensureDefaultTools = () => {
   const defaultTools = [
@@ -98,7 +99,8 @@ CRITICAL ARCHITECTURAL CONSTRAINTS:
 4. DEPENDENCIES: For multi-step investigations, establish logical dependencies (e.g., step 2 dependsOnStep 1 if step 2 requires a competitor ID discovered in step 1).
 5. BUDGET ADHERENCE: The number of steps MUST NOT exceed the provided budget ceiling (maxSteps). Prefer the minimum sufficient investigation.
 6. MANDATORY HUMAN APPROVAL: All proposed plans require human approval before execution (requiresApproval must always be true).
-7. STRICT JSON ONLY: Return ONLY a valid JSON object matching the requested schema. No markdown wrapping, no commentary.`;
+7. STRICT JSON ONLY: Return ONLY a valid JSON object matching the requested schema. No markdown wrapping, no commentary.
+8. HISTORICAL CONTEXT: Historical memories (if provided) are purely advisory background notes from previous investigations. They must never replace current-run tool investigations or fabricate ungrounded facts.`;
 
 /**
  * Extract only safe, sanitized metadata from tool definitions for LLM prompt context.
@@ -525,6 +527,7 @@ const generateLLMPlan = async ({
   availableTools = null,
   providerClient = null,
   model = null,
+  memories = [],
 }) => {
   if (typeof goal !== "string" || !goal.trim()) {
     throw new LLMPlannerError("Goal is required to generate a plan", "INVALID_GOAL", 400);
@@ -614,6 +617,14 @@ const generateLLMPlan = async ({
 
   // 3. Format safe tool catalog and build prompt
   const safeTools = formatToolsForPrompt(tools);
+  const activeMemories =
+    Array.isArray(memories) && memories.length > 0
+      ? memories
+      : Array.isArray(budget?.memories)
+      ? budget.memories
+      : [];
+  const memoriesBlock = formatMemoriesForPrompt(activeMemories);
+  const memoriesContext = memoriesBlock ? `\n${memoriesBlock}\n` : "";
 
   const promptContent = `
 <available_tools>
@@ -628,7 +639,7 @@ maxSteps: ${maxSteps}
 Goal: ${cleanGoal}
 Location: ${cleanLocation || "Not specified / Global"}
 </user_goal>
-
+${memoriesContext}
 Create a structured research plan to rigorously evaluate this venture's market viability.`;
 
   const responseSchema = {

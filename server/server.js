@@ -9,6 +9,7 @@ import agentRoutes from "./agent/agentRoutes.js";
 import { AGENT_RUNS_COLLECTION } from "./agent/agentRun.js";
 import { AGENT_STEPS_COLLECTION } from "./agent/agentStep.js";
 import { AGENT_EVIDENCE_COLLECTION } from "./agent/agentEvidence.js";
+import { AGENT_MEMORIES_COLLECTION } from "./agent/agentMemory.js";
 
 dotenv.config();
 
@@ -79,11 +80,21 @@ const ensureAgentEvidenceIndexes = async () => {
   console.log("Indexes ensured on agent_evidence: { runId: 1, stepId: 1 }, { userId: 1, runId: 1, createdAt: -1 }, { runId: 1, evidenceType: 1 }");
 };
 
+const ensureAgentMemoryIndexes = async () => {
+  const db = getDB();
+  const collection = db.collection(AGENT_MEMORIES_COLLECTION);
+  await collection.createIndex({ userId: 1, status: 1, createdAt: -1 });
+  await collection.createIndex({ userId: 1, location: 1, status: 1 });
+  await collection.createIndex({ runId: 1 });
+  console.log("Indexes ensured on agent_memories: { userId: 1, status: 1, createdAt: -1 }, { userId: 1, location: 1, status: 1 }, { runId: 1 }");
+};
+
 const startServer = async () => {
   await connectDB();
   await ensureAgentRunIndexes();
   await ensureAgentStepIndexes();
   await ensureAgentEvidenceIndexes();
+  await ensureAgentMemoryIndexes();
 
   app.listen(PORT, () => {
     console.log(
@@ -100,4 +111,5 @@ export {
   ensureAgentRunIndexes,
   ensureAgentStepIndexes,
   ensureAgentEvidenceIndexes,
+  ensureAgentMemoryIndexes,
 };
