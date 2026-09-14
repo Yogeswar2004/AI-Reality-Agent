@@ -8,6 +8,11 @@ import {
 } from "../toolConstants.js";
 import { TOOL_FIXTURES } from "../toolFixtures.js";
 import nearbyBusinessSearch from "../../utils/nearbyBusinessSearch.js";
+import {
+  generateNearbyBusinessSearchCacheKey,
+  getCachedEntry,
+  setCachedEntry,
+} from "../agentCache.js";
 
 /**
  * Adapter for the nearby_business_search tool.
@@ -18,6 +23,7 @@ class NearbyBusinessSearchAdapter extends BaseToolAdapter {
     if (definition.id !== TOOL_IDS.NEARBY_BUSINESS_SEARCH) {
       throw new Error("Incorrect tool ID for NearbyBusinessSearchAdapter");
     }
+    this.lastExecutionMeta = null;
   }
 
   /**
@@ -68,11 +74,49 @@ class NearbyBusinessSearchAdapter extends BaseToolAdapter {
   }
 
   /**
-   * Execute the tool logic.
+   * Execute the tool logic with caching.
    * @param {Object} input
    * @returns {Promise<Object>}
    */
   async _execute(input) {
+    const radius = input.radius || 3000;
+    const limit = input.limit || 5;
+
+    // 1. Generate deterministic cache key
+    const cacheKey = generateNearbyBusinessSearchCacheKey({
+      businessType: input.businessType,
+      latitude: input.latitude,
+      longitude: input.longitude,
+      radius,
+      limit,
+    });
+
+    // 2. Check cache first
+    const cached = await getCachedEntry(cacheKey);
+    if (cached && cached.data) {
+      try {
+        this.validateOutput(cached.data);
+        this.lastExecutionMeta = {
+          isCached: true,
+          cachedAt: cached.createdAt,
+          cacheKey,
+          networkCallMade: false,
+        };
+        return {
+          ...cached.data,
+          _cached: true,
+          _cachedAt: cached.createdAt,
+        };
+      } catch (corruptErr) {
+        console.warn(
+          "[NearbyBusinessSearchAdapter] Cached entry was corrupted, bypassing cache:",
+          corruptErr?.message
+        );
+      }
+    }
+
+    // 3. Cache miss: Call provider (mock or live)
+    let output;
     if (process.env.MOCK_MODE === "true") {
       if (input.businessType === "MOCK_QUOTA_ERROR") {
         throw new Error("SEARCH_QUOTA_EXCEEDED: You have exceeded the MONTHLY quota for Requests on your current plan.");
@@ -87,59 +131,84 @@ class NearbyBusinessSearchAdapter extends BaseToolAdapter {
         throw new Error("RapidAPI error 500: Internal Server Error");
       }
       const fixture = TOOL_FIXTURES.nearby_business_search;
-      return {
+      output = {
         ...fixture,
         businesses: fixture.businesses.map((b) => ({ ...b })),
         density: { ...fixture.density },
       };
+    } else {
+      const rawBusinesses = await nearbyBusinessSearch({
+        businessType: input.businessType.trim(),
+        latitude: input.latitude,
+        longitude: input.longitude,
+        radius,
+        limit,
+      });
+
+      const businesses = rawBusinesses.map((b) => ({
+        name: b.name || "Unknown Business",
+        placeId: b.placeId || "",
+        latitude: Number(b.latitude) || 0,
+        longitude: Number(b.longitude) || 0,
+        address: b.address || "",
+        rating: typeof b.rating === "number" ? b.rating : 0,
+        reviewCount: typeof b.reviewCount === "number" ? b.reviewCount : 0,
+        distanceKm: typeof b.distanceKm === "number" ? b.distanceKm : 0,
+      }));
+
+      const within500m = businesses.filter((b) => b.distanceKm <= 0.5).length;
+      const within1km = businesses.filter((b) => b.distanceKm <= 1.0).length;
+      const within3km = businesses.filter((b) => b.distanceKm <= 3.0).length;
+
+      const ratings = businesses.map((b) => b.rating).filter((r) => r > 0);
+      const averageRating =
+        ratings.length > 0
+          ? Number((ratings.reduce((s, r) => s + r, 0) / ratings.length).toFixed(2))
+          : 0;
+
+      const totalReviews = businesses.reduce((s, b) => s + (b.reviewCount || 0), 0);
+
+      output = {
+        totalFound: businesses.length,
+        searchRadius: radius,
+        businesses,
+        density: {
+          within500m,
+          within1km,
+          within3km,
+        },
+        averageRating,
+        totalReviews,
+      };
     }
 
-    const radius = input.radius || 3000;
-    const limit = input.limit || 5;
+    // 4. Validate output before writing to cache
+    this.validateOutput(output);
 
-    const rawBusinesses = await nearbyBusinessSearch({
-      businessType: input.businessType.trim(),
-      latitude: input.latitude,
-      longitude: input.longitude,
-      radius,
-      limit,
+    // 5. Persist to cache
+    await setCachedEntry({
+      key: cacheKey,
+      cacheType: TOOL_IDS.NEARBY_BUSINESS_SEARCH,
+      params: {
+        businessType: input.businessType.trim().toLowerCase(),
+        latitude: Number(input.latitude).toFixed(4),
+        longitude: Number(input.longitude).toFixed(4),
+        radius,
+        limit,
+      },
+      data: output,
+      provider: process.env.MOCK_MODE === "true" ? "internal_fixture" : "rapidapi",
+      ttlSeconds: 24 * 60 * 60,
     });
 
-    const businesses = rawBusinesses.map((b) => ({
-      name: b.name || "Unknown Business",
-      placeId: b.placeId || "",
-      latitude: Number(b.latitude) || 0,
-      longitude: Number(b.longitude) || 0,
-      address: b.address || "",
-      rating: typeof b.rating === "number" ? b.rating : 0,
-      reviewCount: typeof b.reviewCount === "number" ? b.reviewCount : 0,
-      distanceKm: typeof b.distanceKm === "number" ? b.distanceKm : 0,
-    }));
-
-    const within500m = businesses.filter((b) => b.distanceKm <= 0.5).length;
-    const within1km = businesses.filter((b) => b.distanceKm <= 1.0).length;
-    const within3km = businesses.filter((b) => b.distanceKm <= 3.0).length;
-
-    const ratings = businesses.map((b) => b.rating).filter((r) => r > 0);
-    const averageRating =
-      ratings.length > 0
-        ? Number((ratings.reduce((s, r) => s + r, 0) / ratings.length).toFixed(2))
-        : 0;
-
-    const totalReviews = businesses.reduce((s, b) => s + (b.reviewCount || 0), 0);
-
-    return {
-      totalFound: businesses.length,
-      searchRadius: radius,
-      businesses,
-      density: {
-        within500m,
-        within1km,
-        within3km,
-      },
-      averageRating,
-      totalReviews,
+    this.lastExecutionMeta = {
+      isCached: false,
+      cachedAt: null,
+      cacheKey,
+      networkCallMade: true,
     };
+
+    return output;
   }
 
   /**

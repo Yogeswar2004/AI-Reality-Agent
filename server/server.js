@@ -12,6 +12,7 @@ import { AGENT_EVIDENCE_COLLECTION } from "./agent/agentEvidence.js";
 import { AGENT_MEMORIES_COLLECTION } from "./agent/agentMemory.js";
 import { ensureAgentConversationIndexes } from "./agent/agentConversation.js";
 import { ensureAgentConversationMessageIndexes } from "./agent/agentConversationMessage.js";
+import { ensureAgentCacheIndexes } from "./agent/agentCache.js";
 
 dotenv.config();
 
@@ -99,6 +100,7 @@ const startServer = async () => {
   await ensureAgentMemoryIndexes();
   await ensureAgentConversationIndexes();
   await ensureAgentConversationMessageIndexes();
+  await ensureAgentCacheIndexes();
 
   app.listen(PORT, () => {
     console.log(
@@ -118,4 +120,5 @@ export {
   ensureAgentMemoryIndexes,
   ensureAgentConversationIndexes,
   ensureAgentConversationMessageIndexes,
+  ensureAgentCacheIndexes,
 };

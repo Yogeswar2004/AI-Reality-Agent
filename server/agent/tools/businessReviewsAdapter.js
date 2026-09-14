@@ -8,6 +8,11 @@ import {
 } from "../toolConstants.js";
 import { TOOL_FIXTURES } from "../toolFixtures.js";
 import getBusinessReviews from "../../utils/businessReviews.js";
+import {
+  generateBusinessReviewsSearchCacheKey,
+  getCachedEntry,
+  setCachedEntry,
+} from "../agentCache.js";
 
 /**
  * Adapter for the business_reviews_search tool.
@@ -18,6 +23,7 @@ class BusinessReviewsAdapter extends BaseToolAdapter {
     if (definition.id !== TOOL_IDS.BUSINESS_REVIEWS_SEARCH) {
       throw new Error("Incorrect tool ID for BusinessReviewsAdapter");
     }
+    this.lastExecutionMeta = null;
   }
 
   /**
@@ -72,11 +78,50 @@ class BusinessReviewsAdapter extends BaseToolAdapter {
   }
 
   /**
-   * Execute the tool logic.
+   * Execute the tool logic with caching.
    * @param {Object} input
    * @returns {Promise<Object>}
    */
   async _execute(input) {
+    const limit = typeof input.limit === "number" ? input.limit : 5;
+    const region =
+      typeof input.region === "string" && input.region.trim()
+        ? input.region.trim()
+        : null;
+
+    // 1. Generate deterministic cache key
+    const cacheKey = generateBusinessReviewsSearchCacheKey({
+      businessId: input.businessId,
+      limit,
+      region,
+    });
+
+    // 2. Check cache first
+    const cached = await getCachedEntry(cacheKey);
+    if (cached && cached.data) {
+      try {
+        this.validateOutput(cached.data);
+        this.lastExecutionMeta = {
+          isCached: true,
+          cachedAt: cached.createdAt,
+          cacheKey,
+          networkCallMade: false,
+        };
+        return {
+          ...cached.data,
+          _cached: true,
+          _cachedAt: cached.createdAt,
+        };
+      } catch (corruptErr) {
+        console.warn(
+          "[BusinessReviewsAdapter] Cached entry was corrupted, bypassing cache:",
+          corruptErr?.message
+        );
+      }
+    }
+
+    // 3. Cache miss: Call provider (mock or live)
+    let output;
     if (process.env.MOCK_MODE === "true") {
       if (input.businessId === "MOCK_QUOTA_ERROR") {
         throw new Error("REVIEW_QUOTA_EXCEEDED: You have exceeded the MONTHLY quota for Requests on your current plan.");
@@ -91,35 +136,59 @@ class BusinessReviewsAdapter extends BaseToolAdapter {
         throw new Error("RapidAPI error 500: Internal Server Error");
       }
       const fixture = TOOL_FIXTURES.business_reviews_search;
-      return {
+      output = {
         businessId: input.businessId.trim(),
         businessName: input.businessName ? input.businessName.trim() : fixture.businessName,
         totalReviews: fixture.reviews.length,
         reviews: fixture.reviews.map((r) => ({ ...r })),
       };
+    } else {
+      const rawReviews = await getBusinessReviews({
+        businessId: input.businessId.trim(),
+        limit,
+        region,
+      });
+
+      const reviews = (Array.isArray(rawReviews) ? rawReviews : []).map((r) => ({
+        reviewerName: r.reviewerName || "Anonymous",
+        rating: typeof r.rating === "number" ? r.rating : 0,
+        text: r.text || "",
+        date: r.date || null,
+      }));
+
+      output = {
+        businessId: input.businessId.trim(),
+        businessName: input.businessName ? input.businessName.trim() : "Unknown Business",
+        totalReviews: reviews.length,
+        reviews,
+      };
     }
 
-    const limit = typeof input.limit === "number" ? input.limit : 5;
-    const region = typeof input.region === "string" && input.region.trim() ? input.region.trim() : null;
-    const rawReviews = await getBusinessReviews({
-      businessId: input.businessId.trim(),
-      limit,
-      region,
+    // 4. Validate output before writing to cache
+    this.validateOutput(output);
+
+    // 5. Persist to cache
+    await setCachedEntry({
+      key: cacheKey,
+      cacheType: TOOL_IDS.BUSINESS_REVIEWS_SEARCH,
+      params: {
+        businessId: input.businessId.trim(),
+        limit,
+        region,
+      },
+      data: output,
+      provider: process.env.MOCK_MODE === "true" ? "internal_fixture" : "rapidapi",
+      ttlSeconds: 24 * 60 * 60,
     });
 
-    const reviews = (Array.isArray(rawReviews) ? rawReviews : []).map((r) => ({
-      reviewerName: r.reviewerName || "Anonymous",
-      rating: typeof r.rating === "number" ? r.rating : 0,
-      text: r.text || "",
-      date: r.date || null,
-    }));
-
-    return {
-      businessId: input.businessId.trim(),
-      businessName: input.businessName ? input.businessName.trim() : "Unknown Business",
-      totalReviews: reviews.length,
-      reviews,
+    this.lastExecutionMeta = {
+      isCached: false,
+      cachedAt: null,
+      cacheKey,
+      networkCallMade: true,
     };
+
+    return output;
   }
 
   /**

@@ -8,6 +8,11 @@ import {
 } from "../toolConstants.js";
 import { TOOL_FIXTURES } from "../toolFixtures.js";
 import analyzeReviews from "../../utils/reviewAnalyzer.js";
+import {
+  generateReviewSentimentCacheKey,
+  getCachedEntry,
+  setCachedEntry,
+} from "../agentCache.js";
 
 /**
  * Adapter for the review_sentiment_analyzer tool.
@@ -18,6 +23,7 @@ class ReviewSentimentAdapter extends BaseToolAdapter {
     if (definition.id !== TOOL_IDS.REVIEW_SENTIMENT_ANALYZER) {
       throw new Error("Incorrect tool ID for ReviewSentimentAdapter");
     }
+    this.lastExecutionMeta = null;
   }
 
   /**
@@ -68,11 +74,65 @@ class ReviewSentimentAdapter extends BaseToolAdapter {
   }
 
   /**
-   * Execute the tool logic.
+   * Execute the tool logic with caching.
    * @param {Object} input
    * @returns {Promise<Object>}
    */
   async _execute(input) {
+    // If no reviews are provided, return deterministic empty response immediately
+    if (input.reviews.length === 0) {
+      this.lastExecutionMeta = {
+        isCached: false,
+        cachedAt: null,
+        cacheKey: null,
+        networkCallMade: false,
+      };
+      return {
+        summary: "No customer reviews were available for analysis.",
+        strengths: [],
+        weaknesses: [],
+        commonComplaints: [],
+        customerLikes: [],
+        opportunities: [],
+        overallSentiment: "Insufficient data",
+        confidence: "Low",
+        reviewsAnalyzed: 0,
+      };
+    }
+
+    // 1. Generate deterministic cache key
+    const cacheKey = generateReviewSentimentCacheKey({
+      businessName: input.businessName,
+      businessType: input.businessType,
+      reviews: input.reviews,
+    });
+
+    // 2. Check cache first
+    const cached = await getCachedEntry(cacheKey);
+    if (cached && cached.data) {
+      try {
+        this.validateOutput(cached.data);
+        this.lastExecutionMeta = {
+          isCached: true,
+          cachedAt: cached.createdAt,
+          cacheKey,
+          networkCallMade: false,
+        };
+        return {
+          ...cached.data,
+          _cached: true,
+          _cachedAt: cached.createdAt,
+        };
+      } catch (corruptErr) {
+        console.warn(
+          "[ReviewSentimentAdapter] Cached entry was corrupted, bypassing cache:",
+          corruptErr?.message
+        );
+      }
+    }
+
+    // 3. Cache miss: Call provider (mock or live)
+    let output;
     if (process.env.MOCK_MODE === "true") {
       if (input.businessType === "MOCK_QUOTA_ERROR" || input.businessName === "MOCK_QUOTA_ERROR") {
         const err = new Error("Failed to analyze business reviews: Resource has been exhausted (e.g. check quota).");
@@ -86,22 +146,9 @@ class ReviewSentimentAdapter extends BaseToolAdapter {
         err.code = "RATE_LIMIT_EXCEEDED";
         throw err;
       }
-      if (input.reviews.length === 0) {
-        return {
-          summary: "No customer reviews were available for analysis.",
-          strengths: [],
-          weaknesses: [],
-          commonComplaints: [],
-          customerLikes: [],
-          opportunities: [],
-          overallSentiment: "Insufficient data",
-          confidence: "Low",
-          reviewsAnalyzed: 0,
-        };
-      }
 
       const fixture = TOOL_FIXTURES.review_sentiment_analyzer;
-      return {
+      output = {
         ...fixture,
         strengths: [...fixture.strengths],
         weaknesses: [...fixture.weaknesses],
@@ -110,25 +157,51 @@ class ReviewSentimentAdapter extends BaseToolAdapter {
         opportunities: [...fixture.opportunities],
         reviewsAnalyzed: Math.min(input.reviews.length, fixture.reviewsAnalyzed),
       };
+    } else {
+      const analysis = await analyzeReviews({
+        businessName: input.businessName.trim(),
+        businessType: input.businessType.trim(),
+        reviews: input.reviews,
+      });
+
+      output = {
+        summary: typeof analysis.summary === "string" ? analysis.summary : "",
+        strengths: Array.isArray(analysis.strengths) ? analysis.strengths : [],
+        weaknesses: Array.isArray(analysis.weaknesses) ? analysis.weaknesses : [],
+        commonComplaints: Array.isArray(analysis.commonComplaints) ? analysis.commonComplaints : [],
+        customerLikes: Array.isArray(analysis.customerLikes) ? analysis.customerLikes : [],
+        opportunities: Array.isArray(analysis.opportunities) ? analysis.opportunities : [],
+        overallSentiment: typeof analysis.overallSentiment === "string" ? analysis.overallSentiment : "Insufficient data",
+        confidence: typeof analysis.confidence === "string" ? analysis.confidence : "Low",
+        reviewsAnalyzed: typeof analysis.reviewsAnalyzed === "number" ? analysis.reviewsAnalyzed : input.reviews.length,
+      };
     }
 
-    const analysis = await analyzeReviews({
-      businessName: input.businessName.trim(),
-      businessType: input.businessType.trim(),
-      reviews: input.reviews,
+    // 4. Validate output before writing to cache
+    this.validateOutput(output);
+
+    // 5. Persist to cache (48h TTL)
+    await setCachedEntry({
+      key: cacheKey,
+      cacheType: TOOL_IDS.REVIEW_SENTIMENT_ANALYZER,
+      params: {
+        businessName: input.businessName.trim().toLowerCase(),
+        businessType: input.businessType.trim().toLowerCase(),
+        reviewCount: input.reviews.length,
+      },
+      data: output,
+      provider: process.env.MOCK_MODE === "true" ? "internal_fixture" : "gemini",
+      ttlSeconds: 48 * 60 * 60,
     });
 
-    return {
-      summary: typeof analysis.summary === "string" ? analysis.summary : "",
-      strengths: Array.isArray(analysis.strengths) ? analysis.strengths : [],
-      weaknesses: Array.isArray(analysis.weaknesses) ? analysis.weaknesses : [],
-      commonComplaints: Array.isArray(analysis.commonComplaints) ? analysis.commonComplaints : [],
-      customerLikes: Array.isArray(analysis.customerLikes) ? analysis.customerLikes : [],
-      opportunities: Array.isArray(analysis.opportunities) ? analysis.opportunities : [],
-      overallSentiment: typeof analysis.overallSentiment === "string" ? analysis.overallSentiment : "Insufficient data",
-      confidence: typeof analysis.confidence === "string" ? analysis.confidence : "Low",
-      reviewsAnalyzed: typeof analysis.reviewsAnalyzed === "number" ? analysis.reviewsAnalyzed : input.reviews.length,
+    this.lastExecutionMeta = {
+      isCached: false,
+      cachedAt: null,
+      cacheKey,
+      networkCallMade: true,
     };
+
+    return output;
   }
 
   /**

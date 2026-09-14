@@ -164,6 +164,13 @@ export const extractEvidenceFromStep = (step, runContext = {}) => {
       stepNumber: step.stepNumber || null,
       isMock,
       params: step.input?.params || null,
+      isCached: Boolean(step.metadata?.isCached || step.output?._cached),
+      cachedAt: step.metadata?.cachedAt || step.output?._cachedAt || null,
+      cacheKey: step.metadata?.cacheKey || null,
+      networkCallMade:
+        step.metadata?.networkCallMade !== undefined
+          ? Boolean(step.metadata.networkCallMade)
+          : !Boolean(step.metadata?.isCached || step.output?._cached),
     },
   };
 };

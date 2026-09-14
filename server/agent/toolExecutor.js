@@ -136,6 +136,14 @@ const executeToolStep = async ({ runId, userId, toolId, input = {} }) => {
   // 3. Execute adapter
   const result = await adapter.executeTool(input);
 
+  // Extract cache metadata from adapter execution
+  const cacheMeta = adapter.lastExecutionMeta || result.output?._cacheMeta || {
+    isCached: false,
+    cachedAt: null,
+    cacheKey: null,
+    networkCallMade: true,
+  };
+
   // 4. Finalize step with completed or failed status
   const now = new Date();
   let finalizedStep;
@@ -149,6 +157,13 @@ const executeToolStep = async ({ runId, userId, toolId, input = {} }) => {
         status: "failed",
         error: result.error,
         completedAt: now,
+        metadata: {
+          ...(initialStep.metadata || {}),
+          isCached: false,
+          cachedAt: null,
+          cacheKey: null,
+          networkCallMade: true,
+        },
       },
     });
   } else {
@@ -160,6 +175,13 @@ const executeToolStep = async ({ runId, userId, toolId, input = {} }) => {
         status: "completed",
         output: result.output,
         completedAt: now,
+        metadata: {
+          ...(initialStep.metadata || {}),
+          isCached: Boolean(cacheMeta.isCached),
+          cachedAt: cacheMeta.cachedAt || null,
+          cacheKey: cacheMeta.cacheKey || null,
+          networkCallMade: Boolean(cacheMeta.networkCallMade),
+        },
       },
     });
   }
