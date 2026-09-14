@@ -36,6 +36,12 @@ function Agent() {
   const [nextDecision, setNextDecision] = useState(null);
   const [finalOutput, setFinalOutput] = useState(null);
 
+  // --- Conversation State ---
+  const [conversation, setConversation] = useState(null);
+  const [conversationId, setConversationId] = useState(null);
+  const [messages, setMessages] = useState([]);
+  const [chatInput, setChatInput] = useState("");
+
   // --- UI Control State ---
   const [loadingAction, setLoadingAction] = useState("");
   const [error, setError] = useState("");
@@ -67,9 +73,32 @@ function Agent() {
     }
   };
 
-  // Restore active run on page load / browser refresh
+  // Load conversation messages
+  const fetchMessages = async (convId) => {
+    if (!convId) return;
+    try {
+      const res = await api.get(`/agent/conversations/${convId}`);
+      if (res.data?.messages) {
+        setMessages(res.data.messages);
+      }
+      if (res.data?.conversation) {
+        setConversation(res.data.conversation);
+      }
+    } catch (err) {
+      console.warn("Could not fetch conversation messages:", err?.message);
+    }
+  };
+
+  // Restore active run and conversation on page load / browser refresh
   useEffect(() => {
     const savedRunId = localStorage.getItem("active_agent_run_id");
+    const savedConvId = localStorage.getItem("active_agent_conversation_id");
+
+    if (savedConvId) {
+      fetchMessages(savedConvId);
+      setConversationId(savedConvId);
+    }
+
     if (savedRunId && !run) {
       const restoreRun = async () => {
         try {
@@ -82,6 +111,11 @@ function Agent() {
             if (fetchedRun.plan) setPlan(fetchedRun.plan);
             if (fetchedRun.finalOutput) setFinalOutput(fetchedRun.finalOutput);
             if (fetchedRun.currentDecision) setNextDecision(fetchedRun.currentDecision);
+            if (fetchedRun.conversationId && !savedConvId) {
+              setConversationId(fetchedRun.conversationId);
+              localStorage.setItem("active_agent_conversation_id", fetchedRun.conversationId);
+              fetchMessages(fetchedRun.conversationId);
+            }
             await fetchSteps(savedRunId);
             await refreshStatus(savedRunId);
           }
@@ -108,6 +142,7 @@ function Agent() {
           state: data.state,
           stepCount: data.stepCount,
           externalCallCount: data.externalCallCount,
+          replanCount: data.replanCount,
           budget: data.budget,
           plan: data.plan || prev?.plan,
           completedAt: data.completedAt,
@@ -138,13 +173,26 @@ function Agent() {
     setLoadingAction("initializing");
 
     try {
-      // 1. Create run
-      const createRes = await api.post("/agent/runs", {
+      // 1. Create conversation thread
+      const convRes = await api.post("/agent/conversations", {
+        title: goal.trim().slice(0, 50),
         goal: goal.trim(),
         location: location.trim() || null,
       });
-      const newRun = createRes.data.run;
+
+      const newConv = convRes.data.conversation;
+      const newRun = convRes.data.run;
+
+      setConversation(newConv);
+      setConversationId(newConv._id);
+      localStorage.setItem("active_agent_conversation_id", newConv._id);
+
+      if (convRes.data.message) {
+        setMessages([convRes.data.message]);
+      }
+
       setRun(newRun);
+      localStorage.setItem("active_agent_run_id", newRun._id);
 
       // 2. Generate plan immediately (DRAFT -> PLANNING -> AWAITING_APPROVAL)
       setLoadingAction("planning");
@@ -154,8 +202,9 @@ function Agent() {
 
       setPlan(updatedPlan);
       setRun(updatedRun);
-      localStorage.setItem("active_agent_run_id", newRun._id);
+
       await fetchSteps(newRun._id);
+      await fetchMessages(newConv._id);
     } catch (err) {
       setError(
         err.response?.data?.message ||
@@ -163,6 +212,33 @@ function Agent() {
       );
     } finally {
       setLoadingAction("");
+    }
+  };
+
+  // Send conversation message
+  const handleSendMessage = async (e) => {
+    if (e) e.preventDefault();
+    if (!chatInput.trim() || !conversationId) return;
+
+    const content = chatInput.trim();
+    setChatInput("");
+
+    try {
+      const res = await api.post(`/agent/conversations/${conversationId}/messages`, {
+        content,
+      });
+      if (res.data?.message) {
+        setMessages((prev) => [...prev, res.data.message]);
+      }
+      if (res.data?.run) {
+        setRun(res.data.run);
+      }
+      if (run?._id) {
+        await refreshStatus(run._id);
+        await fetchSteps(run._id);
+      }
+    } catch (err) {
+      setError(err.response?.data?.message || "Failed to send message.");
     }
   };
 
@@ -303,11 +379,16 @@ function Agent() {
   // --- Reset to Start New Run ---
   const handleStartNewRun = () => {
     localStorage.removeItem("active_agent_run_id");
+    localStorage.removeItem("active_agent_conversation_id");
     setRun(null);
     setPlan(null);
     setSteps([]);
     setNextDecision(null);
     setFinalOutput(null);
+    setConversation(null);
+    setConversationId(null);
+    setMessages([]);
+    setChatInput("");
     setClarificationAnswer("");
     setError("");
     setGoal("");
@@ -1345,6 +1426,122 @@ function Agent() {
               );
             })()}
           </div>
+        )}
+
+        {/* ===================================================
+            CONVERSATION & DIALOGUE THREAD
+        =================================================== */}
+        {conversationId && (
+          <section style={{ ...styles.card, marginTop: "24px" }}>
+            <div style={styles.cardHeader}>
+              <div>
+                <span style={styles.cardEyebrow}>CONVERSATIONAL AGENT INTERFACE</span>
+                <h3 style={styles.cardTitle}>{conversation?.title || "Investigation Dialogue"}</h3>
+                <p style={styles.cardSubtitle}>
+                  Multi-turn conversation thread. Dialogue history is maintained alongside your investigation.
+                </p>
+              </div>
+              <div>
+                <span style={{ ...styles.badge, background: "rgba(99, 102, 241, 0.15)", color: "#A5B4FC" }}>
+                  {messages.length} Message{messages.length === 1 ? "" : "s"}
+                </span>
+              </div>
+            </div>
+
+            {/* Messages list */}
+            <div style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "12px",
+              maxHeight: "360px",
+              overflowY: "auto",
+              padding: "12px",
+              background: "rgba(10, 10, 15, 0.6)",
+              borderRadius: "8px",
+              marginBottom: "16px",
+              border: "1px solid rgba(255, 255, 255, 0.06)",
+            }}>
+              {messages.length === 0 ? (
+                <p style={{ color: "#71717A", fontSize: "13px", textAlign: "center", margin: "16px 0" }}>
+                  No messages yet. Send a message below to interact with the agent.
+                </p>
+              ) : (
+                messages.map((msg, idx) => {
+                  const isUser = msg.sender === "user";
+                  const isSystem = msg.sender === "system";
+                  return (
+                    <div
+                      key={msg._id || idx}
+                      style={{
+                        alignSelf: isUser ? "flex-end" : "flex-start",
+                        maxWidth: "85%",
+                        background: isUser
+                          ? "rgba(124, 58, 237, 0.2)"
+                          : isSystem
+                          ? "rgba(100, 116, 139, 0.2)"
+                          : "rgba(30, 41, 59, 0.6)",
+                        border: isUser
+                          ? "1px solid rgba(139, 92, 246, 0.4)"
+                          : "1px solid rgba(255, 255, 255, 0.1)",
+                        borderRadius: "10px",
+                        padding: "10px 14px",
+                      }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+                        <strong style={{ fontSize: "12px", color: isUser ? "#C4B5FD" : "#93C5FD" }}>
+                          {isUser ? "You" : isSystem ? "System" : "Reality Agent"}
+                        </strong>
+                        {msg.messageType && msg.messageType !== "text" && (
+                          <span style={{
+                            fontSize: "10px",
+                            padding: "2px 6px",
+                            borderRadius: "4px",
+                            background: msg.messageType === "replan_notice"
+                              ? "rgba(245, 158, 11, 0.25)"
+                              : msg.messageType === "final_verdict"
+                              ? "rgba(16, 185, 129, 0.25)"
+                              : "rgba(99, 102, 241, 0.25)",
+                            color: msg.messageType === "replan_notice"
+                              ? "#FCD34D"
+                              : msg.messageType === "final_verdict"
+                              ? "#6EE7B7"
+                              : "#A5B4FC",
+                          }}>
+                            {msg.messageType.replace("_", " ").toUpperCase()}
+                          </span>
+                        )}
+                        <span style={{ fontSize: "10px", color: "#71717A", marginLeft: "auto" }}>
+                          {msg.createdAt ? new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}
+                        </span>
+                      </div>
+                      <p style={{ margin: 0, fontSize: "13px", color: "#E4E4E7", lineHeight: "1.5", whiteSpace: "pre-wrap" }}>
+                        {msg.content}
+                      </p>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* Message input */}
+            <form onSubmit={handleSendMessage} style={{ display: "flex", gap: "10px" }}>
+              <input
+                type="text"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                placeholder="Message your agent (answers, pivot ideas, questions)..."
+                style={{ ...styles.input, flex: 1 }}
+                disabled={Boolean(loadingAction)}
+              />
+              <button
+                type="submit"
+                style={{ ...styles.primaryButton, padding: "8px 18px" }}
+                disabled={!chatInput.trim() || Boolean(loadingAction)}
+              >
+                Send
+              </button>
+            </form>
+          </section>
         )}
 
       </div>

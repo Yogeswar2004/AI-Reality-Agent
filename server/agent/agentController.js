@@ -12,6 +12,7 @@ import {
   updateAgentRunCurrentDecision,
   updateAgentRunPlan,
   updateAgentRunState as updateRunState,
+  recordAgentRunReplan,
 } from "./agentRun.js";
 import {
   createAgentStep,
@@ -27,6 +28,9 @@ import {
   generatePlanWithFallback,
 } from "./planner.js";
 import {
+  generateLLMReplan,
+} from "./llmPlanner.js";
+import {
   SynthesizerError,
   synthesizeFinalRecommendation,
 } from "./synthesizer.js";
@@ -41,6 +45,18 @@ import {
   recordClarificationMemory,
   recordStopMemory,
 } from "./agentMemory.js";
+import {
+  createConversation,
+  getConversationById,
+  listConversations,
+  updateConversationActiveRun,
+  updateConversationTitle,
+} from "./agentConversation.js";
+import {
+  createConversationMessage,
+  getMessagesByConversationId,
+  formatConversationHistoryForPrompt,
+} from "./agentConversationMessage.js";
 
 const createAgentRun = async (req, res) => {
   try {
@@ -59,11 +75,26 @@ const createAgentRun = async (req, res) => {
       });
     }
 
+    const conversationId = req.body.conversationId || null;
+
     const run = await createRun({
       userId: req.user.userId,
       goal,
       location,
+      conversationId,
     });
+
+    if (conversationId) {
+      try {
+        await updateConversationActiveRun({
+          conversationId,
+          userId: req.user.userId,
+          activeRunId: run._id,
+        });
+      } catch (linkErr) {
+        console.warn("Failed to link run to conversation:", linkErr?.message);
+      }
+    }
 
     return res.status(201).json({
       success: true,
@@ -183,6 +214,99 @@ const processAdvisoryDecision = async ({ runId, userId, run, decision }) => {
           },
           nextState: AGENT_STATES.AWAITING_CLARIFICATION,
         });
+
+        if (updatedRun?.conversationId) {
+          try {
+            await createConversationMessage({
+              conversationId: updatedRun.conversationId,
+              userId,
+              runId,
+              sender: "agent",
+              messageType: "clarification_question",
+              content: decision.question.trim(),
+              metadata: {
+                options: Array.isArray(decision.options) ? decision.options : [],
+              },
+            });
+          } catch (msgErr) {
+            console.warn("Failed to create clarification_question message:", msgErr?.message);
+          }
+        }
+
+        return { decision, run: updatedRun };
+      }
+    }
+  }
+
+  // Handle REPLAN: transition EXECUTING -> PLANNING -> replan -> AWAITING_APPROVAL
+  if (decision.action === "REPLAN") {
+    if (run.state === AGENT_STATES.EXECUTING) {
+      const maxReplans = run.budget?.maxReplans ?? 1;
+      if ((run.replanCount || 0) < maxReplans) {
+        // 1. Transition EXECUTING -> PLANNING
+        const planningRun = await updateRunState({
+          runId,
+          userId,
+          nextState: AGENT_STATES.PLANNING,
+        });
+
+        // 2. Fetch accumulated steps and evidence
+        const steps = await getAgentStepsByRunId({ runId, userId });
+        const evidence = await getAgentEvidenceByRunId({ runId, userId });
+
+        // 3. Fetch conversation history if linked
+        let conversationMessages = [];
+        if (planningRun.conversationId) {
+          try {
+            conversationMessages = await getMessagesByConversationId({
+              conversationId: planningRun.conversationId,
+              userId,
+              limit: 10,
+            });
+          } catch (convErr) {
+            console.warn("Failed to get messages for replan:", convErr?.message);
+          }
+        }
+
+        // 4. Generate candidate replacement plan
+        const newPlan = await generateLLMReplan({
+          run: planningRun,
+          steps,
+          evidence,
+          replanDecision: decision,
+          conversationMessages,
+        });
+
+        // 5. Record replan: increments replanCount, updates plan, sets state to AWAITING_APPROVAL
+        const updatedRun = await recordAgentRunReplan({
+          runId,
+          userId,
+          newPlan,
+          replanReason: decision.reason,
+        });
+
+        // 6. Emit replan_notice to linked conversation if present
+        if (updatedRun?.conversationId) {
+          try {
+            await createConversationMessage({
+              conversationId: updatedRun.conversationId,
+              userId,
+              runId,
+              sender: "agent",
+              messageType: "replan_notice",
+              content: `Investigation pivoted: ${decision.reason}. Replacement plan prepared with ${newPlan.steps?.length || 0} steps; awaiting your approval.`,
+              metadata: {
+                replanReason: decision.reason,
+                invalidatedAssumptions: decision.invalidatedAssumptions || [],
+                suggestedFocus: decision.suggestedFocus || [],
+                newPlanSummary: newPlan.summary,
+              },
+            });
+          } catch (convMsgErr) {
+            console.warn("Failed to create replan_notice message:", convMsgErr?.message);
+          }
+        }
+
         return { decision, run: updatedRun };
       }
     }
@@ -501,6 +625,26 @@ const generateRunPlan = async (req, res) => {
       nextState: AGENT_STATES.AWAITING_APPROVAL,
     });
 
+    if (updatedRun?.conversationId) {
+      try {
+        await createConversationMessage({
+          conversationId: updatedRun.conversationId,
+          userId,
+          runId,
+          sender: "agent",
+          messageType: "plan_proposal",
+          content: `Research plan created with ${plan.steps?.length || 0} steps. Summary: ${plan.summary}`,
+          metadata: {
+            planSummary: plan.summary,
+            stepsCount: plan.steps?.length || 0,
+            ventureType: plan.ventureType || plan.category,
+          },
+        });
+      } catch (msgErr) {
+        console.warn("Failed to create plan_proposal message:", msgErr?.message);
+      }
+    }
+
     return res.status(200).json({
       success: true,
       plan,
@@ -693,6 +837,25 @@ const submitClarificationAnswer = async (req, res) => {
       });
     } catch (memErr) {
       console.warn("Failed to record clarification memory:", memErr?.message);
+    }
+
+    // Emit clarification_answer message to linked conversation
+    if (updatedRun?.conversationId) {
+      try {
+        await createConversationMessage({
+          conversationId: updatedRun.conversationId,
+          userId,
+          runId,
+          sender: "user",
+          messageType: "clarification_answer",
+          content: answer.trim(),
+          metadata: {
+            question: updatedRun.clarification?.question,
+          },
+        });
+      } catch (convMsgErr) {
+        console.warn("Failed to create clarification_answer message:", convMsgErr?.message);
+      }
     }
 
     let nextDecision = null;
@@ -1001,6 +1164,27 @@ const synthesizeRunOutput = async (req, res) => {
       );
     }
 
+    // Emit final_verdict message to linked conversation
+    if (completedRun?.conversationId) {
+      try {
+        await createConversationMessage({
+          conversationId: completedRun.conversationId,
+          userId,
+          runId,
+          sender: "agent",
+          messageType: "final_verdict",
+          content: `Final verdict generated: ${finalOutput.verdict || finalOutput.summary || "Investigation complete"}. Viability score: ${finalOutput.viabilityScore ?? "N/A"}.`,
+          metadata: {
+            verdict: finalOutput.verdict,
+            viabilityScore: finalOutput.viabilityScore,
+            summary: finalOutput.summary,
+          },
+        });
+      } catch (convMsgErr) {
+        console.warn("Failed to create final_verdict message:", convMsgErr?.message);
+      }
+    }
+
     return res.status(200).json({
       success: true,
       finalOutput,
@@ -1267,6 +1451,262 @@ const getRunEvidence = async (req, res) => {
   }
 };
 
+const createConversationHandler = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { title, goal, location } = req.body;
+
+    const conversation = await createConversation({
+      userId,
+      title: typeof title === "string" ? title.trim() : "New Investigation",
+    });
+
+    let run = null;
+    let initialMessage = null;
+
+    if (typeof goal === "string" && goal.trim()) {
+      initialMessage = await createConversationMessage({
+        conversationId: conversation._id,
+        userId,
+        sender: "user",
+        messageType: "text",
+        content: goal.trim(),
+      });
+
+      run = await createRun({
+        userId,
+        goal: goal.trim(),
+        location: typeof location === "string" ? location.trim() || null : null,
+        conversationId: conversation._id,
+      });
+
+      await updateConversationActiveRun({
+        conversationId: conversation._id,
+        userId,
+        activeRunId: run._id,
+      });
+      conversation.activeRunId = run._id;
+    }
+
+    return res.status(201).json({
+      success: true,
+      conversation,
+      ...(run ? { run } : {}),
+      ...(initialMessage ? { message: initialMessage } : {}),
+    });
+  } catch (error) {
+    console.error("Create conversation error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to create conversation",
+    });
+  }
+};
+
+const listConversationsHandler = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const limit = parseInt(req.query.limit, 10) || 20;
+
+    const conversations = await listConversations({ userId, limit });
+
+    return res.status(200).json({
+      success: true,
+      conversations,
+    });
+  } catch (error) {
+    console.error("List conversations error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to list conversations",
+    });
+  }
+};
+
+const getConversationHandler = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const conversationId = req.params.id;
+
+    if (!ObjectId.isValid(conversationId)) {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_CONVERSATION_ID",
+        message: "Invalid conversation ID",
+      });
+    }
+
+    const conversation = await getConversationById({
+      id: conversationId,
+      userId,
+    });
+
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        code: "NOT_FOUND",
+        message: "Conversation not found",
+      });
+    }
+
+    const limit = parseInt(req.query.limit, 10) || 50;
+    const messages = await getMessagesByConversationId({
+      conversationId,
+      userId,
+      limit,
+    });
+
+    let activeRun = null;
+    if (conversation.activeRunId) {
+      activeRun = await getAgentRunById({
+        id: conversation.activeRunId,
+        userId,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      conversation,
+      messages,
+      ...(activeRun ? { activeRun } : {}),
+    });
+  } catch (error) {
+    console.error("Get conversation error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch conversation",
+    });
+  }
+};
+
+const postConversationMessageHandler = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const conversationId = req.params.id;
+
+    if (!ObjectId.isValid(conversationId)) {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_CONVERSATION_ID",
+        message: "Invalid conversation ID",
+      });
+    }
+
+    const conversation = await getConversationById({
+      id: conversationId,
+      userId,
+    });
+
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        code: "NOT_FOUND",
+        message: "Conversation not found",
+      });
+    }
+
+    const {
+      content,
+      sender = "user",
+      messageType = "text",
+      metadata = null,
+      location = null,
+    } = req.body;
+
+    if (typeof content !== "string" || !content.trim()) {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_CONTENT",
+        message: "Message content is required",
+      });
+    }
+
+    let activeRun = null;
+    if (conversation.activeRunId) {
+      activeRun = await getAgentRunById({
+        id: conversation.activeRunId,
+        userId,
+      });
+    }
+
+    // Save message
+    const message = await createConversationMessage({
+      conversationId,
+      userId,
+      runId: activeRun?._id || null,
+      sender,
+      messageType,
+      content: content.trim(),
+      metadata,
+    });
+
+    // Handle clarification answer if active run awaiting clarification
+    if (
+      sender === "user" &&
+      activeRun &&
+      activeRun.state === AGENT_STATES.AWAITING_CLARIFICATION &&
+      activeRun.clarification &&
+      activeRun.clarification.answer === null
+    ) {
+      try {
+        const updatedRun = await recordAgentRunClarificationAnswer({
+          runId: activeRun._id,
+          userId,
+          answer: content.trim(),
+        });
+
+        try {
+          await recordClarificationMemory({
+            run: updatedRun,
+            question: updatedRun.clarification?.question,
+            answer: content.trim(),
+          });
+        } catch (memErr) {
+          console.warn("Failed to record clarification memory:", memErr?.message);
+        }
+
+        activeRun = updatedRun;
+      } catch (clarifyErr) {
+        console.warn("Clarification answer recording notice:", clarifyErr.message);
+      }
+    } else if (
+      sender === "user" &&
+      (!activeRun || [AGENT_STATES.COMPLETED, AGENT_STATES.CANCELLED, AGENT_STATES.FAILED].includes(activeRun.state))
+    ) {
+      // User started a new goal from conversational message
+      try {
+        const newRun = await createRun({
+          userId,
+          goal: content.trim(),
+          location: typeof location === "string" ? location.trim() || null : null,
+          conversationId,
+        });
+
+        await updateConversationActiveRun({
+          conversationId,
+          userId,
+          activeRunId: newRun._id,
+        });
+        activeRun = newRun;
+      } catch (runErr) {
+        console.warn("Failed to auto-create run from message:", runErr?.message);
+      }
+    }
+
+    return res.status(201).json({
+      success: true,
+      message,
+      ...(activeRun ? { run: activeRun } : {}),
+    });
+  } catch (error) {
+    console.error("Post conversation message error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to send message",
+    });
+  }
+};
+
 export {
   approveRunPlan,
   cancelAgentRun,
@@ -1283,4 +1723,8 @@ export {
   submitClarificationAnswer,
   synthesizeRunOutput,
   updateAgentRunState,
+  createConversationHandler,
+  listConversationsHandler,
+  getConversationHandler,
+  postConversationMessageHandler,
 };

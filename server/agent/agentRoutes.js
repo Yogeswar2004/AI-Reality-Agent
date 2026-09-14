@@ -15,10 +15,20 @@ import {
   submitClarificationAnswer,
   synthesizeRunOutput,
   updateAgentRunState,
+  createConversationHandler,
+  listConversationsHandler,
+  getConversationHandler,
+  postConversationMessageHandler,
 } from "./agentController.js";
 import stepRoutes from "./agentStepRoutes.js";
 
 const router = express.Router();
+
+// Conversation endpoints
+router.post("/conversations", authenticateToken, createConversationHandler);
+router.get("/conversations", authenticateToken, listConversationsHandler);
+router.get("/conversations/:id", authenticateToken, getConversationHandler);
+router.post("/conversations/:id/messages", authenticateToken, postConversationMessageHandler);
 
 router.post("/runs", authenticateToken, createAgentRun);
 router.get("/runs/:id", authenticateToken, getAgentRun);

@@ -10,6 +10,8 @@ import { AGENT_RUNS_COLLECTION } from "./agent/agentRun.js";
 import { AGENT_STEPS_COLLECTION } from "./agent/agentStep.js";
 import { AGENT_EVIDENCE_COLLECTION } from "./agent/agentEvidence.js";
 import { AGENT_MEMORIES_COLLECTION } from "./agent/agentMemory.js";
+import { ensureAgentConversationIndexes } from "./agent/agentConversation.js";
+import { ensureAgentConversationMessageIndexes } from "./agent/agentConversationMessage.js";
 
 dotenv.config();
 
@@ -95,6 +97,8 @@ const startServer = async () => {
   await ensureAgentStepIndexes();
   await ensureAgentEvidenceIndexes();
   await ensureAgentMemoryIndexes();
+  await ensureAgentConversationIndexes();
+  await ensureAgentConversationMessageIndexes();
 
   app.listen(PORT, () => {
     console.log(
@@ -112,4 +116,6 @@ export {
   ensureAgentStepIndexes,
   ensureAgentEvidenceIndexes,
   ensureAgentMemoryIndexes,
+  ensureAgentConversationIndexes,
+  ensureAgentConversationMessageIndexes,
 };

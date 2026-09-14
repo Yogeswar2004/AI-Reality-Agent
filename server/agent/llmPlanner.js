@@ -17,6 +17,7 @@ import reviewSentimentAdapter, {
 import { classifyProviderError } from "./providerErrors.js";
 import { resolveModel, getFallbackModel } from "./modelResolver.js";
 import { formatMemoriesForPrompt } from "./agentMemory.js";
+import { formatConversationHistoryForPrompt } from "./agentConversationMessage.js";
 
 const ensureDefaultTools = () => {
   const defaultTools = [
@@ -101,6 +102,81 @@ CRITICAL ARCHITECTURAL CONSTRAINTS:
 6. MANDATORY HUMAN APPROVAL: All proposed plans require human approval before execution (requiresApproval must always be true).
 7. STRICT JSON ONLY: Return ONLY a valid JSON object matching the requested schema. No markdown wrapping, no commentary.
 8. HISTORICAL CONTEXT: Historical memories (if provided) are purely advisory background notes from previous investigations. They must never replace current-run tool investigations or fabricate ungrounded facts.`;
+
+const PLAN_RESPONSE_SCHEMA = Object.freeze({
+  type: "object",
+  properties: {
+    summary: {
+      type: "string",
+      description: "Concise 1-2 sentence overview of the proposed investigation plan.",
+    },
+    goalUnderstanding: {
+      type: "string",
+      description: "Clear interpretation of the user's venture objective and market context.",
+    },
+    ventureType: {
+      type: "string",
+      enum: ["local", "tech", "general", "hybrid"],
+      description: "High-level domain category of the venture.",
+    },
+    targetSteps: {
+      type: "integer",
+      description: "Total number of steps in the plan (must not exceed maxSteps).",
+    },
+    clarificationsNeeded: {
+      type: "array",
+      items: { type: "string" },
+      description: "Clarification questions if essential info is missing (empty array if clear).",
+    },
+    steps: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          stepIndex: {
+            type: "integer",
+            description: "1-based step index (1, 2, 3...).",
+          },
+          toolId: {
+            type: "string",
+            description: "Registered tool ID to execute.",
+          },
+          toolName: {
+            type: "string",
+            description: "Human-readable name of the tool.",
+          },
+          description: {
+            type: "string",
+            description: "Clear explanation of what this step investigates.",
+          },
+          params: {
+            type: "object",
+            description: "Input parameters for the tool. Use null for values dependent on prior steps.",
+          },
+          dependsOnStep: {
+            type: "integer",
+            nullable: true,
+            description: "Earlier stepIndex this step depends on, or null.",
+          },
+        },
+        required: ["stepIndex", "toolId", "description", "params"],
+      },
+    },
+    requiresApproval: {
+      type: "boolean",
+      description: "Must always be true.",
+    },
+  },
+  required: [
+    "summary",
+    "goalUnderstanding",
+    "ventureType",
+    "targetSteps",
+    "steps",
+    "requiresApproval",
+    "clarificationsNeeded",
+  ],
+});
 
 /**
  * Extract only safe, sanitized metadata from tool definitions for LLM prompt context.
@@ -642,81 +718,6 @@ Location: ${cleanLocation || "Not specified / Global"}
 ${memoriesContext}
 Create a structured research plan to rigorously evaluate this venture's market viability.`;
 
-  const responseSchema = {
-    type: "object",
-    properties: {
-      summary: {
-        type: "string",
-        description: "Concise 1-2 sentence overview of the proposed investigation plan.",
-      },
-      goalUnderstanding: {
-        type: "string",
-        description: "Clear interpretation of the user's venture objective and market context.",
-      },
-      ventureType: {
-        type: "string",
-        enum: ["local", "tech", "general", "hybrid"],
-        description: "High-level domain category of the venture.",
-      },
-      targetSteps: {
-        type: "integer",
-        description: "Total number of steps in the plan (must not exceed maxSteps).",
-      },
-      clarificationsNeeded: {
-        type: "array",
-        items: { type: "string" },
-        description: "Clarification questions if essential info is missing (empty array if clear).",
-      },
-      steps: {
-        type: "array",
-        items: {
-          type: "object",
-          properties: {
-            stepIndex: {
-              type: "integer",
-              description: "1-based step index (1, 2, 3...).",
-            },
-            toolId: {
-              type: "string",
-              description: "Registered tool ID to execute.",
-            },
-            toolName: {
-              type: "string",
-              description: "Human-readable name of the tool.",
-            },
-            description: {
-              type: "string",
-              description: "Clear explanation of what this step investigates.",
-            },
-            params: {
-              type: "object",
-              description: "Input parameters for the tool. Use null for values dependent on prior steps.",
-            },
-            dependsOnStep: {
-              type: "integer",
-              nullable: true,
-              description: "Earlier stepIndex this step depends on, or null.",
-            },
-          },
-          required: ["stepIndex", "toolId", "description", "params"],
-        },
-      },
-      requiresApproval: {
-        type: "boolean",
-        description: "Must always be true.",
-      },
-    },
-    required: [
-      "summary",
-      "goalUnderstanding",
-      "ventureType",
-      "targetSteps",
-      "steps",
-      "requiresApproval",
-      "clarificationsNeeded",
-    ],
-  };
-
   // 4. Call Gemini with strict JSON mode, model resolver, and bounded 404 failover
   let responseText;
   let activeModel = resolveModel("planner", { model });
@@ -732,7 +733,7 @@ Create a structured research plan to rigorously evaluate this venture's market v
           systemInstruction: PLANNER_SYSTEM_INSTRUCTION,
           temperature: 0.2,
           responseMimeType: "application/json",
-          responseSchema,
+          responseSchema: PLAN_RESPONSE_SCHEMA,
           abortSignal: AbortSignal.timeout(30000),
           httpOptions: { timeout: 30000 },
         },
@@ -809,11 +810,269 @@ Create a structured research plan to rigorously evaluate this venture's market v
   });
 };
 
+/**
+ * Generate a deterministic replan when MOCK_MODE=true or as a safe fallback.
+ */
+const getMockReplan = ({
+  run,
+  steps = [],
+  evidence = [],
+  replanDecision = null,
+  availableTools = null,
+  remainingSteps = 4,
+}) => {
+  if (!Array.isArray(availableTools)) {
+    ensureDefaultTools();
+  }
+  const tools = Array.isArray(availableTools)
+    ? availableTools
+    : registry.listTools();
+  const toolIds = new Set(tools.map((t) => t.id));
+
+  const budgetRemaining = Math.max(1, remainingSteps);
+  const replanReason =
+    replanDecision?.reason || "Pivoting investigation based on accumulated evidence";
+  const cleanGoal = run?.goal || "";
+  const cleanLocation = run?.location || null;
+
+  const replacementSteps = [];
+
+  const focus = Array.isArray(replanDecision?.suggestedFocus)
+    ? replanDecision.suggestedFocus.join(" ").toLowerCase()
+    : typeof replanDecision?.suggestedFocus === "string"
+    ? replanDecision.suggestedFocus.toLowerCase()
+    : "";
+
+  if (
+    focus.includes("regional") ||
+    focus.includes("broader") ||
+    focus.includes("radius")
+  ) {
+    if (toolIds.has(TOOL_IDS.NEARBY_BUSINESS_SEARCH)) {
+      replacementSteps.push({
+        stepIndex: 1,
+        toolId: TOOL_IDS.NEARBY_BUSINESS_SEARCH,
+        toolName: "Nearby Business Search",
+        description: "Expand search radius to capture wider regional market competitors",
+        params: {
+          businessType: "competitor",
+          radius: 10000,
+          limit: 5,
+        },
+        dependsOnStep: null,
+        status: "pending",
+      });
+    }
+  } else if (toolIds.has(TOOL_IDS.TECH_IDEA_ANALYSIS)) {
+    replacementSteps.push({
+      stepIndex: 1,
+      toolId: TOOL_IDS.TECH_IDEA_ANALYSIS,
+      toolName: "Tech Idea Analysis",
+      description: "Evaluate digital/online alternative feasibility given physical market findings",
+      params: {
+        goal: cleanGoal,
+        location: cleanLocation,
+      },
+      dependsOnStep: null,
+      status: "pending",
+    });
+  } else if (toolIds.has(TOOL_IDS.NEARBY_BUSINESS_SEARCH)) {
+    replacementSteps.push({
+      stepIndex: 1,
+      toolId: TOOL_IDS.NEARBY_BUSINESS_SEARCH,
+      toolName: "Nearby Business Search",
+      description: "Broader regional market search",
+      params: {
+        businessType: "competitor",
+        radius: 5000,
+        limit: 5,
+      },
+      dependsOnStep: null,
+      status: "pending",
+    });
+  }
+
+  const boundedSteps = replacementSteps.slice(0, budgetRemaining);
+
+  const candidate = {
+    summary:
+      replanReason.length > 80
+        ? `Replacement plan: ${replanReason.slice(0, 80)}...`
+        : `Replacement plan: ${replanReason}`,
+    goalUnderstanding: `Adapted plan addressing: ${cleanGoal}`,
+    ventureType: "hybrid",
+    category: "tech",
+    targetSteps: boundedSteps.length,
+    steps: boundedSteps,
+    requiresApproval: true,
+    clarificationsNeeded: [],
+    source: "mock",
+    createdAt: new Date(),
+  };
+
+  return validatePlanSchema(candidate, {
+    maxSteps: budgetRemaining,
+    availableTools: tools,
+  });
+};
+
+/**
+ * Generate a replacement plan when an advisory REPLAN decision is made.
+ * Strictly respects remaining steps budget and requires approval.
+ * Safe fallback to deterministic replan if LLM call fails.
+ */
+const generateLLMReplan = async ({
+  run,
+  steps = [],
+  evidence = [],
+  replanDecision = null,
+  availableTools = null,
+  providerClient = null,
+  model = null,
+  memories = [],
+  conversationMessages = [],
+}) => {
+  const maxSteps = run?.budget?.maxSteps || DEFAULT_BUDGET.maxSteps;
+  const currentStepCount = run?.stepCount || steps.length;
+  const remainingSteps = Math.max(1, maxSteps - currentStepCount);
+
+  if (!Array.isArray(availableTools)) {
+    ensureDefaultTools();
+  }
+  const tools = Array.isArray(availableTools)
+    ? availableTools
+    : registry.listTools();
+
+  // MOCK_MODE handling
+  if (
+    process.env.MOCK_MODE === "true" &&
+    !run?.budget?.mockScenario &&
+    !run?.budget?.mockError
+  ) {
+    return getMockReplan({
+      run,
+      steps,
+      evidence,
+      replanDecision,
+      availableTools: tools,
+      remainingSteps,
+    });
+  }
+
+  if (
+    process.env.MOCK_MODE === "true" &&
+    (run?.budget?.mockScenario || run?.budget?.mockError)
+  ) {
+    const scenario = run.budget.mockScenario || run.budget.mockError;
+    if (scenario === "MOCK_QUOTA_ERROR" || scenario === "quota") {
+      const err = new Error("Resource has been exhausted (e.g. check quota).");
+      err.status = 429;
+      err.code = "RESOURCE_EXHAUSTED";
+      throw err;
+    }
+    return getMockReplan({
+      run,
+      steps,
+      evidence,
+      replanDecision,
+      availableTools: tools,
+      remainingSteps,
+    });
+  }
+
+  // Safe LLM call with deterministic fallback if LLM fails
+  try {
+    const client = providerClient || gemini;
+    if (!client || !client.models || typeof client.models.generateContent !== "function") {
+      throw new LLMPlannerError(
+        "Gemini provider is not configured or unavailable in non-mock mode",
+        "PROVIDER_UNAVAILABLE",
+        502
+      );
+    }
+
+    const safeTools = formatToolsForPrompt(tools);
+    const activeMemories = Array.isArray(memories) && memories.length > 0 ? memories : [];
+    const memoriesBlock = formatMemoriesForPrompt(activeMemories);
+    const convBlock = formatConversationHistoryForPrompt(conversationMessages);
+
+    const replanPrompt = `
+<available_tools>
+${JSON.stringify(safeTools, null, 2)}
+</available_tools>
+
+<planning_constraints>
+remainingStepsBudget: ${remainingSteps}
+maxSteps: ${maxSteps}
+</planning_constraints>
+
+<user_goal>
+Goal: ${run?.goal || ""}
+Location: ${run?.location || "Not specified / Global"}
+</user_goal>
+
+<replan_context>
+Reason: ${replanDecision?.reason || "Pivoting investigation"}
+Invalidated Assumptions: ${JSON.stringify(replanDecision?.invalidatedAssumptions || [])}
+Suggested Focus: ${JSON.stringify(replanDecision?.suggestedFocus || [])}
+</replan_context>
+
+<grounded_evidence>
+${JSON.stringify(evidence, null, 2)}
+</grounded_evidence>
+${memoriesBlock ? `\n${memoriesBlock}\n` : ""}${convBlock ? `\n${convBlock}\n` : ""}
+Propose a replacement plan to pivot the investigation. You have AT MOST ${remainingSteps} replacement steps.`;
+
+    let activeModel = resolveModel("planner", { model });
+    const response = await client.models.generateContent({
+      model: activeModel,
+      contents: replanPrompt,
+      config: {
+        systemInstruction: PLANNER_SYSTEM_INSTRUCTION,
+        temperature: 0.2,
+        responseMimeType: "application/json",
+        responseSchema: PLAN_RESPONSE_SCHEMA,
+        abortSignal: AbortSignal.timeout(30000),
+        httpOptions: { timeout: 30000 },
+      },
+    });
+
+    const responseText = response?.text;
+    const rawPlan = JSON.parse(responseText);
+    rawPlan.source = "llm";
+    rawPlan.model = activeModel;
+    rawPlan.createdAt = new Date();
+
+    return validatePlanSchema(rawPlan, {
+      maxSteps: remainingSteps,
+      availableTools: tools,
+    });
+  } catch (llmErr) {
+    console.warn(
+      `[LLM Planner] Replan LLM generation failed (${llmErr.message}). Falling back to safe deterministic replan.`
+    );
+    const fallbackPlan = getMockReplan({
+      run,
+      steps,
+      evidence,
+      replanDecision,
+      availableTools: tools,
+      remainingSteps,
+    });
+    fallbackPlan.fallbackReason = `LLM replan failed: ${llmErr.message}`;
+    fallbackPlan.source = "mock";
+    return fallbackPlan;
+  }
+};
+
 export {
   LLMPlannerError,
   generateLLMPlan,
+  generateLLMReplan,
   validatePlanSchema,
   formatToolsForPrompt,
   getMockPlan,
+  getMockReplan,
   PLANNER_SYSTEM_INSTRUCTION,
+  PLAN_RESPONSE_SCHEMA,
 };

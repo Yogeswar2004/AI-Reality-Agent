@@ -12,6 +12,7 @@ const DEFAULT_BUDGET = Object.freeze({
   maxSteps: 8,
   maxExternalCalls: 5,
   maxSynthesisCalls: 2,
+  maxReplans: 1,
 });
 
 class AgentRunStateError extends Error {
@@ -25,20 +26,23 @@ class AgentRunStateError extends Error {
 const serializeAgentRun = (run) => ({
   ...run,
   _id: run._id.toString(),
+  conversationId: run.conversationId?.toString() || run.conversationId || null,
 });
 
-const createAgentRun = async ({ userId, goal, location = null }) => {
+const createAgentRun = async ({ userId, goal, location = null, conversationId = null }) => {
   const now = new Date();
 
   const run = {
     userId,
     goal,
     location,
+    conversationId: conversationId && ObjectId.isValid(conversationId) ? new ObjectId(String(conversationId)) : null,
     state: AGENT_STATES.DRAFT,
     budget: { ...DEFAULT_BUDGET },
     stepCount: 0,
     externalCallCount: 0,
     synthesisCallCount: 0,
+    replanCount: 0,
     // New Phase 2 fields
     error: null,
     cancellationReason: null,
@@ -718,13 +722,76 @@ const updateAgentRunCurrentDecision = async ({ runId, userId, currentDecision })
   return serializeAgentRun(updatedRun);
 };
 
+const recordAgentRunReplan = async ({
+  runId,
+  userId,
+  newPlan,
+  replanReason = null,
+}) => {
+  if (!ObjectId.isValid(runId)) {
+    return null;
+  }
+
+  const collection = getDB().collection(AGENT_RUNS_COLLECTION);
+  const currentRun = await collection.findOne({
+    _id: new ObjectId(runId),
+    userId,
+  });
+
+  if (!currentRun) {
+    return null;
+  }
+
+  const maxReplans =
+    currentRun.budget?.maxReplans ?? DEFAULT_BUDGET.maxReplans;
+  if ((currentRun.replanCount || 0) >= maxReplans) {
+    throw new AgentRunStateError(
+      `Budget exceeded: replanCount (${currentRun.replanCount || 0}) reached maxReplans (${maxReplans})`,
+      "BUDGET_EXCEEDED"
+    );
+  }
+
+  const now = new Date();
+  const updateDoc = {
+    $inc: { replanCount: 1 },
+    $set: {
+      plan: newPlan,
+      state: AGENT_STATES.AWAITING_APPROVAL,
+      updatedAt: now,
+    },
+  };
+
+  const updatedRun = await collection.findOneAndUpdate(
+    {
+      _id: currentRun._id,
+      userId,
+      state: AGENT_STATES.PLANNING,
+    },
+    updateDoc,
+    {
+      returnDocument: "after",
+      includeResultMetadata: false,
+    }
+  );
+
+  if (!updatedRun) {
+    throw new AgentRunStateError(
+      "Agent run state changed before replan could be recorded",
+      "STATE_CONFLICT"
+    );
+  }
+
+  return serializeAgentRun(updatedRun);
+};
+
 // Indexes for agent_runs
 const initAgentRunIndexes = async () => {
   try {
     const db = getDB();
     const collection = db.collection(AGENT_RUNS_COLLECTION);
     await collection.createIndex({ userId: 1, createdAt: -1 });
-    console.log("Index ensured on agent_runs: { userId: 1, createdAt: -1 }");
+    await collection.createIndex({ conversationId: 1 });
+    console.log("Indexes ensured on agent_runs: { userId: 1, createdAt: -1 }, { conversationId: 1 }");
   } catch (err) {
     // Ignore index creation errors (e.g., db not connected, index exists)
     console.warn("Failed to create index on agent_runs:", err.message);
@@ -750,4 +817,5 @@ export {
   recordAgentRunClarificationAnswer,
   stopAgentRun,
   updateAgentRunCurrentDecision,
+  recordAgentRunReplan,
 };
