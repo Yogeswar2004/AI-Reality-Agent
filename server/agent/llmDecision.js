@@ -15,6 +15,7 @@ import reviewSentimentAdapter, {
   reviewSentimentDefinition,
 } from "./tools/reviewSentimentAdapter.js";
 import { classifyProviderError } from "./providerErrors.js";
+import { resolveModel, getFallbackModel } from "./modelResolver.js";
 
 const ensureDefaultTools = () => {
   const defaultTools = [
@@ -80,6 +81,7 @@ const ALLOWED_TOP_LEVEL_KEYS = Object.freeze([
   "evidenceEvaluation",
   "isAdaptiveDeviation",
   "deviationReason",
+  "model",
 ]);
 
 /**
@@ -807,7 +809,11 @@ const getMockDecision = ({
     err.code = "RATE_LIMIT_EXCEEDED";
     throw err;
   }
-  if (scenario === "MOCK_404_ERROR" || scenario === "model_not_found") {
+  if (
+    scenario === "MOCK_404_ERROR" ||
+    scenario === "model_not_found" ||
+    scenario === "MOCK_ALL_MODELS_404"
+  ) {
     const err = new Error("models/gemini-unavailable is not found for API version v1beta.");
     err.status = 404;
     err.code = "NOT_FOUND";
@@ -1333,13 +1339,33 @@ const generateLLMDecision = async ({
 
   // If mock error scenario requested in mock mode
   if (process.env.MOCK_MODE === "true" && (mockScenario || run?.mockScenario)) {
+    const activeScenario = mockScenario || run?.mockScenario;
+    if (activeScenario === "MOCK_404_PRIMARY_FAILOVER") {
+      const currentModel = resolveModel("decision", { model });
+      const attemptedModels = new Set([currentModel]);
+      const nextModel = getFallbackModel("decision", currentModel, attemptedModels);
+      if (nextModel) {
+        console.warn(
+          `[LLM Decision Mock] Primary model '${currentModel}' is unavailable. Failing over to '${nextModel}' (hop 1/1)...`
+        );
+        const dec = getMockDecision({
+          run,
+          steps,
+          evidence,
+          availableTools: tools,
+          mockScenario: null,
+        });
+        dec.model = nextModel;
+        return dec;
+      }
+    }
     try {
       return getMockDecision({
         run,
         steps,
         evidence,
         availableTools: tools,
-        mockScenario: mockScenario || run?.mockScenario,
+        mockScenario: activeScenario,
       });
     } catch (mockErr) {
       const classification = classifyProviderError(mockErr);
@@ -1455,45 +1481,64 @@ const generateLLMDecision = async ({
     required: ["action", "reasoning"],
   };
 
-  // 4. Call Gemini with strict JSON mode
+  // 4. Call Gemini with strict JSON mode, model resolver, and bounded 404 failover
   let responseText;
-  try {
-    const selectedModel = model || process.env.GEMINI_MODEL || "gemini-2.5-flash";
-    const response = await client.models.generateContent({
-      model: selectedModel,
-      contents: promptContent,
-      config: {
-        systemInstruction: DECISION_SYSTEM_INSTRUCTION,
-        temperature: 0.1,
-        responseMimeType: "application/json",
-        responseSchema,
-        abortSignal: AbortSignal.timeout(30000),
-        httpOptions: { timeout: 30000 },
-      },
-    });
-    responseText = response?.text;
-  } catch (providerErr) {
-    const classification = classifyProviderError(providerErr);
-    const code = classification.isQuota
-      ? "QUOTA_EXHAUSTED"
-      : classification.isModelUnavailable
-      ? "MODEL_UNAVAILABLE"
-      : classification.isRateLimited
-      ? "RATE_LIMITED"
-      : "PROVIDER_REQUEST_FAILED";
-    const statusCode = classification.isQuota
-      ? 429
-      : classification.isModelUnavailable
-      ? 404
-      : classification.isRateLimited
-      ? 429
-      : 502;
-    throw new LLMDecisionError(
-      `Gemini decision request failed: ${classification.sanitizedMessage}`,
-      code,
-      statusCode,
-      providerErr
-    );
+  let activeModel = resolveModel("decision", { model });
+  const attemptedModels = new Set();
+
+  while (activeModel) {
+    attemptedModels.add(activeModel);
+    try {
+      const response = await client.models.generateContent({
+        model: activeModel,
+        contents: promptContent,
+        config: {
+          systemInstruction: DECISION_SYSTEM_INSTRUCTION,
+          temperature: 0.1,
+          responseMimeType: "application/json",
+          responseSchema,
+          abortSignal: AbortSignal.timeout(30000),
+          httpOptions: { timeout: 30000 },
+        },
+      });
+      responseText = response?.text;
+      break;
+    } catch (providerErr) {
+      const classification = classifyProviderError(providerErr);
+
+      // Failover is ONLY allowed on MODEL_UNAVAILABLE / 404, never on quota exhaustion or other errors
+      if (classification.isModelUnavailable) {
+        const nextModel = getFallbackModel("decision", activeModel, attemptedModels);
+        if (nextModel) {
+          console.warn(
+            `[LLM Decision] Gemini model '${activeModel}' is unavailable (${classification.statusCode || 404}). Attempting fallback to '${nextModel}' (hop 1/1)...`
+          );
+          activeModel = nextModel;
+          continue;
+        }
+      }
+
+      const code = classification.isQuota
+        ? "QUOTA_EXHAUSTED"
+        : classification.isModelUnavailable
+        ? "MODEL_UNAVAILABLE"
+        : classification.isRateLimited
+        ? "RATE_LIMITED"
+        : "PROVIDER_REQUEST_FAILED";
+      const statusCode = classification.isQuota
+        ? 429
+        : classification.isModelUnavailable
+        ? 404
+        : classification.isRateLimited
+        ? 429
+        : 502;
+      throw new LLMDecisionError(
+        `Gemini decision request failed: ${classification.sanitizedMessage}`,
+        code,
+        statusCode,
+        providerErr
+      );
+    }
   }
 
   if (!responseText || typeof responseText !== "string" || !responseText.trim()) {
@@ -1518,12 +1563,15 @@ const generateLLMDecision = async ({
 
   // 6. Application validation firewall
   rawDecision.source = "llm";
-  return validateDecisionSchema(rawDecision, {
+  rawDecision.model = activeModel;
+  const validatedDecision = validateDecisionSchema(rawDecision, {
     run,
     steps,
     evidence,
     availableTools: tools,
   });
+  validatedDecision.model = activeModel;
+  return validatedDecision;
 };
 
 export {

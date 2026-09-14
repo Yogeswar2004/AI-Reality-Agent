@@ -1,5 +1,6 @@
 import gemini from "../config/gemini.js";
 import { classifyProviderError } from "../agent/providerErrors.js";
+import { resolveModel, getFallbackModel } from "../agent/modelResolver.js";
 
 const sleep = (ms) =>
 new Promise((resolve) =>
@@ -44,6 +45,7 @@ reviewsAnalyzed: reviews.length,
     reviews,
     geminiClient = null,
     sleepFn = sleep,
+    model = null,
   }) => {
   try {
   if (
@@ -220,100 +222,41 @@ Low
 
 
 let response = null;
+let activeModel = resolveModel("sentiment", { model });
+const attemptedModels = new Set();
+const maxRetriesPerModel = 3;
 
-/*
- * Gemini can occasionally return 503 when the
- * model is temporarily busy.
- *
- * Retry a few times instead of immediately failing.
- */
+while (activeModel) {
+  attemptedModels.add(activeModel);
+  let modelSucceeded = false;
 
-const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxRetriesPerModel; attempt++) {
+    try {
+      console.log(
+        `Gemini review analysis attempt ${attempt}/${maxRetriesPerModel} (model: ${activeModel})...`
+      );
 
-for (
-  let attempt = 1;
-  attempt <= maxAttempts;
-  attempt++
-) {
-  try {
-    console.log(
-      `Gemini review analysis attempt ${attempt}/${maxAttempts}...`
-    );
-
-    const activeClient = geminiClient || gemini;
-    response =
-      await activeClient.models.generateContent({
-        model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
-
+      const activeClient = geminiClient || gemini;
+      response = await activeClient.models.generateContent({
+        model: activeModel,
         contents: prompt,
-
         config: {
           abortSignal: AbortSignal.timeout(30000),
           httpOptions: { timeout: 30000 },
-          responseMimeType:
-            "application/json",
-
+          responseMimeType: "application/json",
           responseSchema: {
             type: "object",
-
             properties: {
-              summary: {
-                type: "string",
-              },
-
-              strengths: {
-                type: "array",
-
-                items: {
-                  type: "string",
-                },
-              },
-
-              weaknesses: {
-                type: "array",
-
-                items: {
-                  type: "string",
-                },
-              },
-
-              commonComplaints: {
-                type: "array",
-
-                items: {
-                  type: "string",
-                },
-              },
-
-              customerLikes: {
-                type: "array",
-
-                items: {
-                  type: "string",
-                },
-              },
-
-              opportunities: {
-                type: "array",
-
-                items: {
-                  type: "string",
-                },
-              },
-
-              overallSentiment: {
-                type: "string",
-              },
-
-              confidence: {
-                type: "string",
-              },
-
-              reviewsAnalyzed: {
-                type: "integer",
-              },
+              summary: { type: "string" },
+              strengths: { type: "array", items: { type: "string" } },
+              weaknesses: { type: "array", items: { type: "string" } },
+              commonComplaints: { type: "array", items: { type: "string" } },
+              customerLikes: { type: "array", items: { type: "string" } },
+              opportunities: { type: "array", items: { type: "string" } },
+              overallSentiment: { type: "string" },
+              confidence: { type: "string" },
+              reviewsAnalyzed: { type: "integer" },
             },
-
             required: [
               "summary",
               "strengths",
@@ -329,63 +272,52 @@ for (
         },
       });
 
-    /*
-     * Gemini request succeeded.
-     */
-
-    break;
-
-  } catch (error) {
-    console.error(
-      `Gemini attempt ${attempt} failed:`,
-      error.message
-    );
-
-    /*
-     * Classify provider error to distinguish true quota exhaustion
-     * from temporary rate limiting, timeouts, and server errors.
-     */
-    const classified = classifyProviderError(error);
-
-    // If true quota exhaustion, do NOT perform unnecessary retries!
-    if (classified.isQuota) {
-      console.warn(
-        `Gemini review analysis quota exhausted (${classified.sanitizedMessage}). Aborting retries immediately.`
+      modelSucceeded = true;
+      break;
+    } catch (error) {
+      console.error(
+        `Gemini attempt ${attempt} failed with model ${activeModel}:`,
+        error.message
       );
-      throw error;
+
+      const classified = classifyProviderError(error);
+
+      // If true quota exhaustion, do NOT perform unnecessary retries and NEVER fail over!
+      if (classified.isQuota) {
+        console.warn(
+          `Gemini review analysis quota exhausted (${classified.sanitizedMessage}). Aborting retries immediately.`
+        );
+        throw error;
+      }
+
+      // If model is unavailable (404), break retry loop to trigger model failover immediately
+      if (classified.isModelUnavailable) {
+        const nextModel = getFallbackModel("sentiment", activeModel, attemptedModels);
+        if (nextModel) {
+          console.warn(
+            `[Review Analyzer] Gemini model '${activeModel}' is unavailable (${classified.statusCode || 404}). Attempting fallback to '${nextModel}' (hop 1/1)...`
+          );
+          activeModel = nextModel;
+          break;
+        } else {
+          throw error;
+        }
+      }
+
+      // Retry only temporary errors (timeouts, 5xx server errors, temporary rate limits)
+      const retryable = classified.isTemporary;
+      if (!retryable || attempt === maxRetriesPerModel) {
+        throw error;
+      }
+
+      const waitTime = attempt === 1 ? 2000 : 5000;
+      console.log(`Waiting ${waitTime / 1000} seconds before retry...`);
+      await sleepFn(waitTime);
     }
+  }
 
-    /*
-     * Retry only temporary errors (timeouts, 5xx server errors, temporary rate limits).
-     */
-    const retryable = classified.isTemporary;
-
-    if (
-      !retryable ||
-      attempt === maxAttempts
-    ) {
-      throw error;
-    }
-
-    /*
-     * Wait progressively longer:
-     *
-     * attempt 1 → 2 seconds
-     * attempt 2 → 5 seconds
-     */
-
-    const waitTime =
-      attempt === 1
-        ? 2000
-        : 5000;
-
-    console.log(
-      `Waiting ${
-        waitTime / 1000
-      } seconds before retry...`
-    );
-
-    await sleepFn(waitTime);
+  if (modelSucceeded) {
+    break;
   }
 }
 
@@ -481,6 +413,8 @@ return {
     Number(
       analysis.reviewsAnalyzed
     ) || reviews.length,
+
+  model: activeModel,
 };
 
 

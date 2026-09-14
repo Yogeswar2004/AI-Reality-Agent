@@ -15,6 +15,7 @@ import reviewSentimentAdapter, {
   reviewSentimentDefinition,
 } from "./tools/reviewSentimentAdapter.js";
 import { classifyProviderError } from "./providerErrors.js";
+import { resolveModel, getFallbackModel } from "./modelResolver.js";
 
 const ensureDefaultTools = () => {
   const defaultTools = [
@@ -61,6 +62,7 @@ const ALLOWED_TOP_LEVEL_KEYS = Object.freeze([
   "source",
   "createdAt",
   "fallbackReason",
+  "model",
 ]);
 
 /**
@@ -325,6 +327,7 @@ const validatePlanSchema = (plan, options = {}) => {
     source: plan.source || "llm",
     createdAt: plan.createdAt instanceof Date ? plan.createdAt : new Date(),
     ...(plan.fallbackReason ? { fallbackReason: String(plan.fallbackReason) } : {}),
+    ...(plan.model ? { model: String(plan.model) } : {}),
   };
 };
 
@@ -352,7 +355,11 @@ const getMockPlan = ({ goal, location = null, budget = null, availableTools = nu
     err.code = "RATE_LIMIT_EXCEEDED";
     throw err;
   }
-  if (budget?.mockScenario === "MOCK_404_ERROR" || budget?.mockError === "model_not_found") {
+  if (
+    budget?.mockScenario === "MOCK_404_ERROR" ||
+    budget?.mockScenario === "MOCK_ALL_MODELS_404" ||
+    budget?.mockError === "model_not_found"
+  ) {
     const err = new Error("models/gemini-unavailable is not found for API version v1beta.");
     err.status = 404;
     err.code = "NOT_FOUND";
@@ -545,6 +552,24 @@ const generateLLMPlan = async ({
 
   // If mock error scenario requested via budget in mock mode
   if (process.env.MOCK_MODE === "true" && (budget?.mockScenario || budget?.mockError)) {
+    if (budget?.mockScenario === "MOCK_404_PRIMARY_FAILOVER") {
+      const currentModel = resolveModel("planner", { model });
+      const attemptedModels = new Set([currentModel]);
+      const nextModel = getFallbackModel("planner", currentModel, attemptedModels);
+      if (nextModel) {
+        console.warn(
+          `[LLM Planner Mock] Primary model '${currentModel}' is unavailable. Failing over to '${nextModel}' (hop 1/1)...`
+        );
+        const plan = getMockPlan({
+          goal: cleanGoal,
+          location: cleanLocation,
+          budget: { ...budget, mockScenario: null, mockError: null },
+          availableTools: tools,
+        });
+        plan.model = nextModel;
+        return plan;
+      }
+    }
     try {
       return getMockPlan({
         goal: cleanGoal,
@@ -681,47 +706,65 @@ Create a structured research plan to rigorously evaluate this venture's market v
     ],
   };
 
-  // 4. Call Gemini with strict JSON mode
+  // 4. Call Gemini with strict JSON mode, model resolver, and bounded 404 failover
   let responseText;
-  try {
-    const selectedModel =
-      model || process.env.GEMINI_MODEL || "gemini-2.5-flash";
-    const response = await client.models.generateContent({
-      model: selectedModel,
-      contents: promptContent,
-      config: {
-        systemInstruction: PLANNER_SYSTEM_INSTRUCTION,
-        temperature: 0.2,
-        responseMimeType: "application/json",
-        responseSchema,
-        abortSignal: AbortSignal.timeout(30000),
-        httpOptions: { timeout: 30000 },
-      },
-    });
+  let activeModel = resolveModel("planner", { model });
+  const attemptedModels = new Set();
 
-    responseText = response?.text;
-  } catch (providerErr) {
-    const classification = classifyProviderError(providerErr);
-    const code = classification.isQuota
-      ? "QUOTA_EXHAUSTED"
-      : classification.isModelUnavailable
-      ? "MODEL_UNAVAILABLE"
-      : classification.isRateLimited
-      ? "RATE_LIMITED"
-      : "PROVIDER_REQUEST_FAILED";
-    const statusCode = classification.isQuota
-      ? 429
-      : classification.isModelUnavailable
-      ? 404
-      : classification.isRateLimited
-      ? 429
-      : 502;
-    throw new LLMPlannerError(
-      `Gemini planner request failed: ${classification.sanitizedMessage}`,
-      code,
-      statusCode,
-      providerErr
-    );
+  while (activeModel) {
+    attemptedModels.add(activeModel);
+    try {
+      const response = await client.models.generateContent({
+        model: activeModel,
+        contents: promptContent,
+        config: {
+          systemInstruction: PLANNER_SYSTEM_INSTRUCTION,
+          temperature: 0.2,
+          responseMimeType: "application/json",
+          responseSchema,
+          abortSignal: AbortSignal.timeout(30000),
+          httpOptions: { timeout: 30000 },
+        },
+      });
+
+      responseText = response?.text;
+      break;
+    } catch (providerErr) {
+      const classification = classifyProviderError(providerErr);
+
+      // Failover is ONLY allowed on MODEL_UNAVAILABLE / 404, never on quota exhaustion or other errors
+      if (classification.isModelUnavailable) {
+        const nextModel = getFallbackModel("planner", activeModel, attemptedModels);
+        if (nextModel) {
+          console.warn(
+            `[LLM Planner] Gemini model '${activeModel}' is unavailable (${classification.statusCode || 404}). Attempting fallback to '${nextModel}' (hop 1/1)...`
+          );
+          activeModel = nextModel;
+          continue;
+        }
+      }
+
+      const code = classification.isQuota
+        ? "QUOTA_EXHAUSTED"
+        : classification.isModelUnavailable
+        ? "MODEL_UNAVAILABLE"
+        : classification.isRateLimited
+        ? "RATE_LIMITED"
+        : "PROVIDER_REQUEST_FAILED";
+      const statusCode = classification.isQuota
+        ? 429
+        : classification.isModelUnavailable
+        ? 404
+        : classification.isRateLimited
+        ? 429
+        : 502;
+      throw new LLMPlannerError(
+        `Gemini planner request failed: ${classification.sanitizedMessage}`,
+        code,
+        statusCode,
+        providerErr
+      );
+    }
   }
 
   if (!responseText || typeof responseText !== "string" || !responseText.trim()) {
@@ -746,6 +789,7 @@ Create a structured research plan to rigorously evaluate this venture's market v
 
   // 6. Enforce independent application-side validation
   rawPlan.source = "llm";
+  rawPlan.model = activeModel;
   rawPlan.createdAt = new Date();
 
   return validatePlanSchema(rawPlan, {
