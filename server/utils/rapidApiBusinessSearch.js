@@ -303,8 +303,31 @@ if (error.response) {
   );
 }
 
+const status = error.response?.status || error.status;
+const message = error.response?.data?.message || error.message || "Failed to search nearby businesses";
+
+if (status === 429) {
+  const isQuota =
+    message.toLowerCase().includes("quota") ||
+    message.toLowerCase().includes("monthly") ||
+    message.toLowerCase().includes("daily") ||
+    message.toLowerCase().includes("plan");
+
+  if (isQuota) {
+    const err = new Error(`SEARCH_QUOTA_EXCEEDED: ${message}`);
+    err.code = "SEARCH_QUOTA_EXCEEDED";
+    err.status = 429;
+    throw err;
+  } else {
+    const err = new Error(`RATE_LIMIT_EXCEEDED: ${message}`);
+    err.code = "RATE_LIMIT_EXCEEDED";
+    err.status = 429;
+    throw err;
+  }
+}
+
 throw new Error(
-  "Failed to search nearby businesses using RapidAPI"
+  `Failed to search nearby businesses using RapidAPI: ${message}`
 );
 
 

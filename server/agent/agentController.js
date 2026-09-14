@@ -34,6 +34,7 @@ import {
   VALID_EVIDENCE_TYPES,
   getAgentEvidenceByRunId,
 } from "./agentEvidence.js";
+import { classifyProviderError } from "./providerErrors.js";
 
 const createAgentRun = async (req, res) => {
   try {
@@ -198,6 +199,24 @@ const processAdvisoryDecision = async ({ runId, userId, run, decision }) => {
     }
   }
 
+  // Handle QUOTA_EXHAUSTED: transition EXECUTING -> QUOTA_LIMITED & record error
+  if (decision.action === "QUOTA_EXHAUSTED") {
+    if (run.state === AGENT_STATES.EXECUTING) {
+      const updatedRun = await updateRunState({
+        runId,
+        userId,
+        nextState: AGENT_STATES.QUOTA_LIMITED,
+        error: decision.message || "Quota limit reached for this run",
+      });
+      await updateAgentRunCurrentDecision({
+        runId,
+        userId,
+        currentDecision: null,
+      });
+      return { decision, run: updatedRun };
+    }
+  }
+
   return { decision, run };
 };
 
@@ -220,6 +239,67 @@ const executeTool = async (req, res) => {
       toolId: toolId.trim(),
       input,
     });
+
+    // Check if tool execution failed due to provider quota or model failure
+    if (result.step?.status === "failed" && result.step.error) {
+      const toolClassification = classifyProviderError(result.step.error);
+
+      if (toolClassification.isQuota) {
+        console.warn(
+          `[Tool Execution] External provider quota exhausted: ${toolClassification.sanitizedMessage}. Transitioning run to QUOTA_LIMITED.`
+        );
+        let quotaRun = null;
+        try {
+          quotaRun = await updateRunState({
+            runId,
+            userId,
+            nextState: AGENT_STATES.QUOTA_LIMITED,
+            error: toolClassification.sanitizedMessage,
+          });
+          await updateAgentRunCurrentDecision({
+            runId,
+            userId,
+            currentDecision: null,
+          });
+        } catch (stateErr) {
+          console.warn("Failed to transition run to QUOTA_LIMITED:", stateErr?.message);
+        }
+
+        return res.status(200).json({
+          ...result,
+          run: quotaRun || result.run,
+          nextDecision: null,
+        });
+      }
+
+      if (toolClassification.isModelUnavailable) {
+        console.warn(
+          `[Tool Execution] Model unavailable in tool: ${toolClassification.sanitizedMessage}. Transitioning run to FAILED.`
+        );
+        let failedRun = null;
+        try {
+          failedRun = await updateRunState({
+            runId,
+            userId,
+            nextState: AGENT_STATES.FAILED,
+            error: toolClassification.sanitizedMessage,
+          });
+          await updateAgentRunCurrentDecision({
+            runId,
+            userId,
+            currentDecision: null,
+          });
+        } catch (stateErr) {
+          console.warn("Failed to transition run to FAILED:", stateErr?.message);
+        }
+
+        return res.status(200).json({
+          ...result,
+          run: failedRun || result.run,
+          nextDecision: null,
+        });
+      }
+    }
 
     let nextDecision = null;
     let updatedRunFromDecision = null;
@@ -247,7 +327,8 @@ const executeTool = async (req, res) => {
       );
     }
 
-    if (nextDecision) {
+    const isTerminal = nextDecision?.action === "TERMINAL";
+    if (nextDecision && !isTerminal) {
       const persistedRun = await updateAgentRunCurrentDecision({
         runId,
         userId,
@@ -346,6 +427,8 @@ const generateRunPlan = async (req, res) => {
       goal: run.goal,
       location: run.location,
       budget: run.budget,
+      runId,
+      userId,
     });
 
     // 3. Persist plan on run document
@@ -490,7 +573,8 @@ const getNextDecision = async (req, res) => {
       decision,
     });
 
-    if (processed.decision) {
+    const isTerminal = processed.decision?.action === "TERMINAL";
+    if (processed.decision && !isTerminal) {
       const persistedRun = await updateAgentRunCurrentDecision({
         runId,
         userId,
@@ -498,6 +582,15 @@ const getNextDecision = async (req, res) => {
       });
       if (persistedRun) {
         processed.run = persistedRun;
+      }
+    } else {
+      const clearedRun = await updateAgentRunCurrentDecision({
+        runId,
+        userId,
+        currentDecision: null,
+      });
+      if (clearedRun) {
+        processed.run = clearedRun;
       }
     }
 
@@ -583,7 +676,8 @@ const submitClarificationAnswer = async (req, res) => {
       );
     }
 
-    if (nextDecision) {
+    const isTerminal = nextDecision?.action === "TERMINAL";
+    if (nextDecision && !isTerminal) {
       const persistedRun = await updateAgentRunCurrentDecision({
         runId,
         userId,
@@ -683,7 +777,8 @@ const approveRunPlan = async (req, res) => {
       );
     }
 
-    if (nextDecision) {
+    const isTerminal = nextDecision?.action === "TERMINAL";
+    if (nextDecision && !isTerminal) {
       const persistedRun = await updateAgentRunCurrentDecision({
         runId,
         userId,
@@ -692,6 +787,12 @@ const approveRunPlan = async (req, res) => {
       if (persistedRun) {
         updatedRunFromDecision = persistedRun;
       }
+    } else {
+      await updateAgentRunCurrentDecision({
+        runId,
+        userId,
+        currentDecision: null,
+      });
     }
 
     return res.status(200).json({

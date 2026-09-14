@@ -74,6 +74,18 @@ class ReviewSentimentAdapter extends BaseToolAdapter {
    */
   async _execute(input) {
     if (process.env.MOCK_MODE === "true") {
+      if (input.businessType === "MOCK_QUOTA_ERROR" || input.businessName === "MOCK_QUOTA_ERROR") {
+        const err = new Error("Failed to analyze business reviews: Resource has been exhausted (e.g. check quota).");
+        err.status = 429;
+        err.code = "RESOURCE_EXHAUSTED";
+        throw err;
+      }
+      if (input.businessType === "MOCK_RATE_LIMIT_ERROR" || input.businessName === "MOCK_RATE_LIMIT_ERROR") {
+        const err = new Error("Failed to analyze business reviews: Too Many Requests: Rate limit reached, try again in 1s");
+        err.status = 429;
+        err.code = "RATE_LIMIT_EXCEEDED";
+        throw err;
+      }
       if (input.reviews.length === 0) {
         return {
           summary: "No customer reviews were available for analysis.",

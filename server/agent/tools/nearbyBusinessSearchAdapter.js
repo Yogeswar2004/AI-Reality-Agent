@@ -74,6 +74,18 @@ class NearbyBusinessSearchAdapter extends BaseToolAdapter {
    */
   async _execute(input) {
     if (process.env.MOCK_MODE === "true") {
+      if (input.businessType === "MOCK_QUOTA_ERROR") {
+        throw new Error("SEARCH_QUOTA_EXCEEDED: You have exceeded the MONTHLY quota for Requests on your current plan.");
+      }
+      if (input.businessType === "MOCK_RATE_LIMIT_ERROR") {
+        const err = new Error("RATE_LIMIT_EXCEEDED: Too Many Requests. Try again in 1s.");
+        err.status = 429;
+        err.code = "RATE_LIMIT_EXCEEDED";
+        throw err;
+      }
+      if (input.businessType === "MOCK_500_ERROR") {
+        throw new Error("RapidAPI error 500: Internal Server Error");
+      }
       const fixture = TOOL_FIXTURES.nearby_business_search;
       return {
         ...fixture,

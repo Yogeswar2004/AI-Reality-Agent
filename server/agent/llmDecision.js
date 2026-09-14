@@ -14,6 +14,7 @@ import businessReviewsAdapter, {
 import reviewSentimentAdapter, {
   reviewSentimentDefinition,
 } from "./tools/reviewSentimentAdapter.js";
+import { classifyProviderError } from "./providerErrors.js";
 
 const ensureDefaultTools = () => {
   const defaultTools = [
@@ -33,11 +34,15 @@ const ensureDefaultTools = () => {
  * Custom error class for LLM Decision failures.
  */
 class LLMDecisionError extends Error {
-  constructor(message, code = "DECISION_ERROR", statusCode = 400) {
+  constructor(message, code = "DECISION_ERROR", statusCode = 400, originalError = null) {
     super(message);
     this.name = "LLMDecisionError";
     this.code = code;
     this.statusCode = statusCode;
+    if (originalError) {
+      this.originalError = originalError;
+      this.cause = originalError;
+    }
   }
 }
 
@@ -790,6 +795,35 @@ const getMockDecision = ({
 
   const scenario = mockScenario || run?.mockScenario;
 
+  if (scenario === "MOCK_QUOTA_ERROR" || scenario === "quota") {
+    const err = new Error("Resource has been exhausted (e.g. check quota).");
+    err.status = 429;
+    err.code = "RESOURCE_EXHAUSTED";
+    throw err;
+  }
+  if (scenario === "MOCK_RATE_LIMIT_ERROR" || scenario === "rate_limit") {
+    const err = new Error("Too Many Requests: Rate limit exceeded");
+    err.status = 429;
+    err.code = "RATE_LIMIT_EXCEEDED";
+    throw err;
+  }
+  if (scenario === "MOCK_404_ERROR" || scenario === "model_not_found") {
+    const err = new Error("models/gemini-unavailable is not found for API version v1beta.");
+    err.status = 404;
+    err.code = "NOT_FOUND";
+    throw err;
+  }
+  if (scenario === "MOCK_TIMEOUT_ERROR" || scenario === "timeout") {
+    const err = new Error("The operation was aborted due to timeout");
+    err.name = "AbortError";
+    throw err;
+  }
+  if (scenario === "MOCK_500_ERROR" || scenario === "server_error") {
+    const err = new Error("The service is temporarily unavailable.");
+    err.status = 503;
+    throw err;
+  }
+
   // Adaptive mock scenarios
   if (
     scenario === "RADIUS_EXPANSION" ||
@@ -1287,7 +1321,7 @@ const generateLLMDecision = async ({
     : registry.listTools();
 
   // 1. In MOCK_MODE, return deterministic validated mock decision
-  if (process.env.MOCK_MODE === "true") {
+  if (process.env.MOCK_MODE === "true" && !mockScenario && !run?.mockScenario) {
     return getMockDecision({
       run,
       steps,
@@ -1295,6 +1329,41 @@ const generateLLMDecision = async ({
       availableTools: tools,
       mockScenario: mockScenario || run?.mockScenario,
     });
+  }
+
+  // If mock error scenario requested in mock mode
+  if (process.env.MOCK_MODE === "true" && (mockScenario || run?.mockScenario)) {
+    try {
+      return getMockDecision({
+        run,
+        steps,
+        evidence,
+        availableTools: tools,
+        mockScenario: mockScenario || run?.mockScenario,
+      });
+    } catch (mockErr) {
+      const classification = classifyProviderError(mockErr);
+      const code = classification.isQuota
+        ? "QUOTA_EXHAUSTED"
+        : classification.isModelUnavailable
+        ? "MODEL_UNAVAILABLE"
+        : classification.isRateLimited
+        ? "RATE_LIMITED"
+        : "PROVIDER_REQUEST_FAILED";
+      const statusCode = classification.isQuota
+        ? 429
+        : classification.isModelUnavailable
+        ? 404
+        : classification.isRateLimited
+        ? 429
+        : 502;
+      throw new LLMDecisionError(
+        `Gemini decision request failed: ${classification.sanitizedMessage}`,
+        code,
+        statusCode,
+        mockErr
+      );
+    }
   }
 
   // 2. Resolve Gemini client
@@ -1404,10 +1473,26 @@ const generateLLMDecision = async ({
     });
     responseText = response?.text;
   } catch (providerErr) {
+    const classification = classifyProviderError(providerErr);
+    const code = classification.isQuota
+      ? "QUOTA_EXHAUSTED"
+      : classification.isModelUnavailable
+      ? "MODEL_UNAVAILABLE"
+      : classification.isRateLimited
+      ? "RATE_LIMITED"
+      : "PROVIDER_REQUEST_FAILED";
+    const statusCode = classification.isQuota
+      ? 429
+      : classification.isModelUnavailable
+      ? 404
+      : classification.isRateLimited
+      ? 429
+      : 502;
     throw new LLMDecisionError(
-      `Gemini decision request failed: ${providerErr?.message || "Unknown error"}`,
-      "PROVIDER_REQUEST_FAILED",
-      502
+      `Gemini decision request failed: ${classification.sanitizedMessage}`,
+      code,
+      statusCode,
+      providerErr
     );
   }
 

@@ -162,9 +162,7 @@ const nearbyBusinessSearch = async ({
       error.message || error
     );
 
-    throw new Error(
-      "Failed to search nearby competitors"
-    );
+    throw error;
   }
 };
 

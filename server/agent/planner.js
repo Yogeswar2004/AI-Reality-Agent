@@ -1,5 +1,9 @@
 import { ObjectId } from "mongodb";
-import { getAgentRunById } from "./agentRun.js";
+import {
+  getAgentRunById,
+  updateAgentRunCurrentDecision,
+  updateAgentRunState,
+} from "./agentRun.js";
 import { getAgentStepsByRunId } from "./agentStep.js";
 import { getAgentEvidenceByRunId } from "./agentEvidence.js";
 import { AGENT_STATES } from "./agentState.js";
@@ -8,6 +12,7 @@ import { TOOL_IDS } from "./toolConstants.js";
 import { techIdeaAnalysisDefinition } from "./tools/techIdeaAnalysisAdapter.js";
 import { generateLLMPlan, LLMPlannerError } from "./llmPlanner.js";
 import { generateLLMDecision, LLMDecisionError } from "./llmDecision.js";
+import { classifyProviderError } from "./providerErrors.js";
 
 class PlannerError extends Error {
   constructor(message, code, statusCode = 400) {
@@ -614,24 +619,7 @@ const evaluateNextStep = async ({
     );
   }
 
-  if (!run.plan) {
-    throw new PlannerError(
-      "No plan generated for this run yet",
-      "PLAN_NOT_FOUND",
-      400
-    );
-  }
-
-  // 1. Check approval gate
-  if (run.state === AGENT_STATES.AWAITING_APPROVAL) {
-    return {
-      action: "AWAIT_APPROVAL",
-      message: "Plan requires user approval before execution can proceed",
-      plan: run.plan,
-    };
-  }
-
-  // 2. Check terminal states
+  // 1. Check terminal states first
   const terminalStates = new Set([
     AGENT_STATES.COMPLETED,
     AGENT_STATES.FAILED,
@@ -644,6 +632,23 @@ const evaluateNextStep = async ({
       state: run.state,
       message: `Run is in terminal state '${run.state}'`,
     };
+  }
+
+  // 2. Check approval gate
+  if (run.state === AGENT_STATES.AWAITING_APPROVAL) {
+    return {
+      action: "AWAIT_APPROVAL",
+      message: "Plan requires user approval before execution can proceed",
+      plan: run.plan,
+    };
+  }
+
+  if (!run.plan) {
+    throw new PlannerError(
+      "No plan generated for this run yet",
+      "PLAN_NOT_FOUND",
+      400
+    );
   }
 
   // 3. In EXECUTING state: evaluate progress with LLM adaptive decision and deterministic fallback
@@ -661,6 +666,69 @@ const evaluateNextStep = async ({
       });
       return decision;
     } catch (err) {
+      const classification = classifyProviderError(err);
+
+      // Quota Exhausted: transition to QUOTA_LIMITED, persist sanitized error, clear currentDecision
+      if (classification.isQuota) {
+        console.warn(
+          `[LLM Decision] Gemini quota exhausted (${err.code || err.name}: ${err.message}). Transitioning run to QUOTA_LIMITED.`
+        );
+        try {
+          await updateAgentRunState({
+            runId,
+            userId,
+            nextState: AGENT_STATES.QUOTA_LIMITED,
+            error: classification.sanitizedMessage,
+          });
+          await updateAgentRunCurrentDecision({
+            runId,
+            userId,
+            currentDecision: null,
+          });
+        } catch (stateErr) {
+          // If already in terminal state or transition error, ignore conflict
+        }
+
+        return {
+          action: "TERMINAL",
+          state: AGENT_STATES.QUOTA_LIMITED,
+          reason: classification.sanitizedMessage,
+          message: `Run halted: Gemini quota exhausted (${classification.sanitizedMessage})`,
+          source: "provider_quota_exhausted",
+        };
+      }
+
+      // Model Unavailable (404 / NOT_FOUND): transition to FAILED, persist sanitized error
+      if (classification.isModelUnavailable) {
+        console.warn(
+          `[LLM Decision] Gemini model unavailable (${err.code || err.name}: ${err.message}). Transitioning run to FAILED.`
+        );
+        try {
+          await updateAgentRunState({
+            runId,
+            userId,
+            nextState: AGENT_STATES.FAILED,
+            error: classification.sanitizedMessage,
+          });
+          await updateAgentRunCurrentDecision({
+            runId,
+            userId,
+            currentDecision: null,
+          });
+        } catch (stateErr) {
+          // If already in terminal state, ignore conflict
+        }
+
+        return {
+          action: "TERMINAL",
+          state: AGENT_STATES.FAILED,
+          reason: classification.sanitizedMessage,
+          message: `Run failed: Gemini model unavailable (${classification.sanitizedMessage})`,
+          source: "provider_model_unavailable",
+        };
+      }
+
+      // Temporary failure (timeout, 5xx, parse error, etc.): PRESERVE deterministic fallback!
       console.warn(
         `[LLM Decision] Failed to generate adaptive decision via LLM (${err.code || err.name}: ${err.message}). Falling back to deterministic decision.`
       );
@@ -672,7 +740,7 @@ const evaluateNextStep = async ({
       return {
         ...fallbackDecision,
         source: "deterministic_fallback",
-        fallbackReason: err.message || "LLM decision unavailable",
+        fallbackReason: classification.sanitizedMessage || err.message || "LLM decision unavailable",
       };
     }
   }
@@ -713,6 +781,8 @@ const generatePlanWithFallback = async ({
   availableTools = null,
   providerClient = null,
   model = null,
+  runId = null,
+  userId = null,
 }) => {
   try {
     const plan = await generateLLMPlan({
@@ -725,6 +795,67 @@ const generatePlanWithFallback = async ({
     });
     return plan;
   } catch (err) {
+    const classification = classifyProviderError(err);
+
+    // If quota exhausted: transition run to QUOTA_LIMITED and throw PlannerError
+    if (classification.isQuota) {
+      console.warn(
+        `[LLM Planner] Gemini quota exhausted (${err.code || err.name}: ${err.message}).`
+      );
+      if (runId && userId) {
+        try {
+          await updateAgentRunState({
+            runId,
+            userId,
+            nextState: AGENT_STATES.QUOTA_LIMITED,
+            error: classification.sanitizedMessage,
+          });
+          await updateAgentRunCurrentDecision({
+            runId,
+            userId,
+            currentDecision: null,
+          });
+        } catch (stateErr) {
+          // If transition not possible, continue
+        }
+      }
+      throw new PlannerError(
+        `Gemini quota exhausted: ${classification.sanitizedMessage}`,
+        "QUOTA_EXHAUSTED",
+        429
+      );
+    }
+
+    // If model unavailable (404): transition run to FAILED and throw PlannerError
+    if (classification.isModelUnavailable) {
+      console.warn(
+        `[LLM Planner] Gemini model unavailable (${err.code || err.name}: ${err.message}).`
+      );
+      if (runId && userId) {
+        try {
+          await updateAgentRunState({
+            runId,
+            userId,
+            nextState: AGENT_STATES.FAILED,
+            error: classification.sanitizedMessage,
+          });
+          await updateAgentRunCurrentDecision({
+            runId,
+            userId,
+            currentDecision: null,
+          });
+        } catch (stateErr) {
+          // If transition not possible, continue
+        }
+      }
+      throw new PlannerError(
+        `Gemini model unavailable: ${classification.sanitizedMessage}`,
+        "MODEL_UNAVAILABLE",
+        404
+      );
+    }
+
+    // Temporary failure (timeout, 5xx, parse error, etc.): PRESERVE deterministic fallback!
     console.warn(
       `[LLM Planner] Failed to generate plan via LLM (${err.code || err.name}: ${err.message}). Falling back to deterministic planner.`
     );
@@ -732,7 +863,7 @@ const generatePlanWithFallback = async ({
     return {
       ...deterministicPlan,
       source: "deterministic_fallback",
-      fallbackReason: err.message || "LLM planner unavailable",
+      fallbackReason: classification.sanitizedMessage || err.message || "LLM planner unavailable",
       goalUnderstanding: deterministicPlan.summary,
       clarificationsNeeded: [],
     };

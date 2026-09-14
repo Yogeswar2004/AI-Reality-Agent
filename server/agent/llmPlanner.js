@@ -14,6 +14,7 @@ import businessReviewsAdapter, {
 import reviewSentimentAdapter, {
   reviewSentimentDefinition,
 } from "./tools/reviewSentimentAdapter.js";
+import { classifyProviderError } from "./providerErrors.js";
 
 const ensureDefaultTools = () => {
   const defaultTools = [
@@ -33,11 +34,15 @@ const ensureDefaultTools = () => {
  * Custom error class for LLM Planner failures.
  */
 class LLMPlannerError extends Error {
-  constructor(message, code = "PLANNER_ERROR", statusCode = 400) {
+  constructor(message, code = "PLANNER_ERROR", statusCode = 400, originalError = null) {
     super(message);
     this.name = "LLMPlannerError";
     this.code = code;
     this.statusCode = statusCode;
+    if (originalError) {
+      this.originalError = originalError;
+      this.cause = originalError;
+    }
   }
 }
 
@@ -335,6 +340,35 @@ const validatePlanSchema = (plan, options = {}) => {
  * @returns {Object} Validated mock plan object.
  */
 const getMockPlan = ({ goal, location = null, budget = null, availableTools = null }) => {
+  if (budget?.mockScenario === "MOCK_QUOTA_ERROR" || budget?.mockError === "quota") {
+    const err = new Error("Resource has been exhausted (e.g. check quota).");
+    err.status = 429;
+    err.code = "RESOURCE_EXHAUSTED";
+    throw err;
+  }
+  if (budget?.mockScenario === "MOCK_RATE_LIMIT_ERROR" || budget?.mockError === "rate_limit") {
+    const err = new Error("Too Many Requests: Rate limit exceeded");
+    err.status = 429;
+    err.code = "RATE_LIMIT_EXCEEDED";
+    throw err;
+  }
+  if (budget?.mockScenario === "MOCK_404_ERROR" || budget?.mockError === "model_not_found") {
+    const err = new Error("models/gemini-unavailable is not found for API version v1beta.");
+    err.status = 404;
+    err.code = "NOT_FOUND";
+    throw err;
+  }
+  if (budget?.mockScenario === "MOCK_TIMEOUT_ERROR" || budget?.mockError === "timeout") {
+    const err = new Error("The operation was aborted due to timeout");
+    err.name = "AbortError";
+    throw err;
+  }
+  if (budget?.mockScenario === "MOCK_500_ERROR" || budget?.mockError === "server_error") {
+    const err = new Error("The service is temporarily unavailable.");
+    err.status = 503;
+    throw err;
+  }
+
   const cleanGoal = typeof goal === "string" ? goal.trim() : "";
   const cleanLocation = typeof location === "string" ? location.trim() || null : null;
 
@@ -500,13 +534,47 @@ const generateLLMPlan = async ({
     : DEFAULT_BUDGET.maxSteps;
 
   // 1. In MOCK_MODE, return deterministic validated mock plan without network call
-  if (process.env.MOCK_MODE === "true") {
+  if (process.env.MOCK_MODE === "true" && !budget?.mockScenario && !budget?.mockError) {
     return getMockPlan({
       goal: cleanGoal,
       location: cleanLocation,
       budget,
       availableTools: tools,
     });
+  }
+
+  // If mock error scenario requested via budget in mock mode
+  if (process.env.MOCK_MODE === "true" && (budget?.mockScenario || budget?.mockError)) {
+    try {
+      return getMockPlan({
+        goal: cleanGoal,
+        location: cleanLocation,
+        budget,
+        availableTools: tools,
+      });
+    } catch (mockErr) {
+      const classification = classifyProviderError(mockErr);
+      const code = classification.isQuota
+        ? "QUOTA_EXHAUSTED"
+        : classification.isModelUnavailable
+        ? "MODEL_UNAVAILABLE"
+        : classification.isRateLimited
+        ? "RATE_LIMITED"
+        : "PROVIDER_REQUEST_FAILED";
+      const statusCode = classification.isQuota
+        ? 429
+        : classification.isModelUnavailable
+        ? 404
+        : classification.isRateLimited
+        ? 429
+        : 502;
+      throw new LLMPlannerError(
+        `Gemini planner request failed: ${classification.sanitizedMessage}`,
+        code,
+        statusCode,
+        mockErr
+      );
+    }
   }
 
   // 2. Resolve Gemini client
@@ -633,10 +701,26 @@ Create a structured research plan to rigorously evaluate this venture's market v
 
     responseText = response?.text;
   } catch (providerErr) {
+    const classification = classifyProviderError(providerErr);
+    const code = classification.isQuota
+      ? "QUOTA_EXHAUSTED"
+      : classification.isModelUnavailable
+      ? "MODEL_UNAVAILABLE"
+      : classification.isRateLimited
+      ? "RATE_LIMITED"
+      : "PROVIDER_REQUEST_FAILED";
+    const statusCode = classification.isQuota
+      ? 429
+      : classification.isModelUnavailable
+      ? 404
+      : classification.isRateLimited
+      ? 429
+      : 502;
     throw new LLMPlannerError(
-      `Gemini planner request failed: ${providerErr?.message || "Unknown error"}`,
-      "PROVIDER_REQUEST_FAILED",
-      502
+      `Gemini planner request failed: ${classification.sanitizedMessage}`,
+      code,
+      statusCode,
+      providerErr
     );
   }
 

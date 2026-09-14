@@ -149,15 +149,18 @@ const updateAgentRunState = async ({
     updateDoc.startedAt = now;
   }
 
-  // Set completedAt when entering a terminal state (only if not already set)
+  // Set completedAt when entering a terminal state (only if not already set) and clear currentDecision
   const terminalStates = new Set([
     AGENT_STATES.COMPLETED,
     AGENT_STATES.FAILED,
     AGENT_STATES.CANCELLED,
     AGENT_STATES.QUOTA_LIMITED,
   ]);
-  if (terminalStates.has(nextState) && !currentRun.completedAt) {
-    updateDoc.completedAt = now;
+  if (terminalStates.has(nextState)) {
+    updateDoc.currentDecision = null;
+    if (!currentRun.completedAt) {
+      updateDoc.completedAt = now;
+    }
   }
 
   const updatedRun = await collection.findOneAndUpdate(

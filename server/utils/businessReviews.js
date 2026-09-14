@@ -299,9 +299,23 @@ const getBusinessReviews = async ({
     // ----------------------------------------
 
     if (status === 429) {
-      throw new Error(
-        `REVIEW_QUOTA_EXCEEDED: ${message}`
-      );
+      const isQuota =
+        message.toLowerCase().includes("quota") ||
+        message.toLowerCase().includes("monthly") ||
+        message.toLowerCase().includes("daily") ||
+        message.toLowerCase().includes("plan");
+
+      if (isQuota) {
+        const err = new Error(`REVIEW_QUOTA_EXCEEDED: ${message}`);
+        err.code = "REVIEW_QUOTA_EXCEEDED";
+        err.status = 429;
+        throw err;
+      } else {
+        const err = new Error(`RATE_LIMIT_EXCEEDED: ${message}`);
+        err.code = "RATE_LIMIT_EXCEEDED";
+        err.status = 429;
+        throw err;
+      }
     }
 
     // ----------------------------------------

@@ -975,7 +975,26 @@ function Agent() {
                   <div>
                     <h4 style={styles.terminalAlertTitle}>Quota Budget Exhausted</h4>
                     <p style={styles.terminalAlertText}>
-                      This run reached its configured step or external-call limit. The system halted further tool execution to prevent excessive provider usage.
+                      {run.error
+                        ? run.error
+                        : "This run reached its configured step or external-call limit. The system halted further tool execution to prevent excessive provider usage."}
+                    </p>
+                  </div>
+                  <button type="button" style={styles.secondaryButton} onClick={handleStartNewRun}>
+                    Start New Run
+                  </button>
+                </div>
+              )}
+
+              {run.state === "failed" && (
+                <div style={styles.terminalAlert}>
+                  <span style={styles.terminalAlertIcon}>✕</span>
+                  <div>
+                    <h4 style={styles.terminalAlertTitle}>Investigation Failed</h4>
+                    <p style={styles.terminalAlertText}>
+                      {run.error
+                        ? run.error
+                        : "An unrecoverable provider or system error occurred."}
                     </p>
                   </div>
                   <button type="button" style={styles.secondaryButton} onClick={handleStartNewRun}>

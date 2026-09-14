@@ -1,4 +1,5 @@
 import gemini from "../config/gemini.js";
+import { classifyProviderError } from "../agent/providerErrors.js";
 
 const sleep = (ms) =>
 new Promise((resolve) =>
@@ -38,14 +39,17 @@ reviewsAnalyzed: reviews.length,
 * Analyze customer reviews using Gemini.
   */
   const analyzeReviews = async ({
-  businessName,
-  businessType,
-  reviews,
+    businessName,
+    businessType,
+    reviews,
+    geminiClient = null,
+    sleepFn = sleep,
   }) => {
   try {
   if (
-  process.env.MOCK_MODE !== "true" &&
-  !process.env.GEMINI_API_KEY
+    process.env.MOCK_MODE !== "true" &&
+    !geminiClient &&
+    !process.env.GEMINI_API_KEY
   ) {
   throw new Error(
   "GEMINI_API_KEY is not configured in .env"
@@ -78,7 +82,7 @@ reviewsAnalyzed: reviews.length,
   };
   }
 
-  if (process.env.MOCK_MODE === "true") {
+  if (process.env.MOCK_MODE === "true" && !geminiClient) {
   return getMockReviewAnalysis(reviews);
   }
 
@@ -236,8 +240,9 @@ for (
       `Gemini review analysis attempt ${attempt}/${maxAttempts}...`
     );
 
+    const activeClient = geminiClient || gemini;
     response =
-      await gemini.models.generateContent({
+      await activeClient.models.generateContent({
         model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
 
         contents: prompt,
@@ -337,17 +342,23 @@ for (
     );
 
     /*
-     * Retry only temporary errors.
+     * Classify provider error to distinguish true quota exhaustion
+     * from temporary rate limiting, timeouts, and server errors.
      */
+    const classified = classifyProviderError(error);
 
-    const status =
-      error.status ||
-      error.response?.status;
+    // If true quota exhaustion, do NOT perform unnecessary retries!
+    if (classified.isQuota) {
+      console.warn(
+        `Gemini review analysis quota exhausted (${classified.sanitizedMessage}). Aborting retries immediately.`
+      );
+      throw error;
+    }
 
-    const retryable =
-      status === 503 ||
-      status === 429 ||
-      status === 500;
+    /*
+     * Retry only temporary errors (timeouts, 5xx server errors, temporary rate limits).
+     */
+    const retryable = classified.isTemporary;
 
     if (
       !retryable ||
@@ -374,7 +385,7 @@ for (
       } seconds before retry...`
     );
 
-    await sleep(waitTime);
+    await sleepFn(waitTime);
   }
 }
 
@@ -474,17 +485,18 @@ return {
 
 
 } catch (error) {
-console.error(
-"Review analysis error:",
-error
-);
+  console.error(
+    "Review analysis error:",
+    error
+  );
 
-
-throw new Error(
-  "Failed to analyze business reviews"
-);
-
-
+  const err = new Error(
+    `Failed to analyze business reviews: ${error.message || error}`
+  );
+  err.status = error.status || error.response?.status;
+  err.code = error.code || error.response?.data?.error?.code;
+  err.originalError = error;
+  throw err;
 }
 };
 
