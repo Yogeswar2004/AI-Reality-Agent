@@ -204,13 +204,32 @@ function Dashboard() {
               </p>
             </div>
 
-            <Link
-              to="/analyze"
-              style={styles.analyzeButton}
-              className="dashboard-analyze-button"
-            >
-              + Analyze New Idea
-            </Link>
+            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+              <Link
+                to="/agent"
+                style={{
+                  ...styles.analyzeButton,
+                  background: "var(--primary-gradient)",
+                  border: "1px solid rgba(168, 85, 247, 0.4)",
+                  boxShadow: "0 4px 14px var(--primary-glow)",
+                }}
+                className="dashboard-analyze-button"
+              >
+                ✦ Launch AI Agent
+              </Link>
+              <Link
+                to="/analyze"
+                style={{
+                  ...styles.analyzeButton,
+                  background: "var(--bg-elevated)",
+                  color: "var(--text-primary)",
+                  border: "1px solid var(--border-default)",
+                }}
+                className="dashboard-analyze-button"
+              >
+                + Analyze Idea
+              </Link>
+            </div>
           </section>
 
           {/* =================================================

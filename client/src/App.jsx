@@ -1,74 +1,48 @@
-import { Routes, Route } from "react-router-dom";
-
-import Navbar from "./components/Navbar";
-import ProtectedRoute from "./components/ProtectedRoute";
+import { Routes, Route, Navigate } from "react-router-dom";
+import { AuthProvider } from "./context/AuthContext";
+import AppShell from "./components/layout/AppShell";
+import ProtectedRoute from "./components/layout/ProtectedRoute";
 
 import Home from "./pages/Home";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
+import Agent from "./pages/Agent";
 import Dashboard from "./pages/Dashboard";
-import AnalyzeIdea from "./pages/AnalyzeIdea";
-import AnalysisResults from "./pages/AnalysisResults";
 import MyIdeas from "./pages/MyIdeas";
 import CompareIdeas from "./pages/CompareIdeas";
-import Agent from "./pages/Agent";
+import Profile from "./pages/Profile";
+import AnalyzeIdea from "./pages/AnalyzeIdea";
+import AnalysisResults from "./pages/AnalysisResults";
 
 function App() {
   return (
-    <> <Navbar />
+    <AuthProvider>
+      <AppShell>
+        <Routes>
+          {/* Public Routes */}
+          <Route path="/" element={<Home />} />
+          <Route path="/login" element={<Login />} />
+          <Route path="/register" element={<Register />} />
 
+          {/* Protected Routes */}
+          <Route element={<ProtectedRoute />}>
+            <Route path="/agent" element={<Agent />} />
+            <Route path="/dashboard" element={<Dashboard />} />
+            <Route path="/my-ideas" element={<MyIdeas />} />
+            <Route path="/compare" element={<CompareIdeas />} />
+            <Route path="/profile" element={<Profile />} />
 
-      <Routes>
-        {/* Public Routes */}
-        <Route path="/" element={<Home />} />
+            {/* Legacy Reality Analyzer Routes */}
+            <Route path="/analyze" element={<AnalyzeIdea />} />
+            <Route path="/analysis/:id" element={<AnalysisResults />} />
+            <Route path="/analysis-results/:id" element={<AnalysisResults />} />
+          </Route>
 
-        <Route path="/login" element={<Login />} />
-
-        <Route
-          path="/register"
-          element={<Register />}
-        />
-
-        {/* Protected Routes */}
-        <Route element={<ProtectedRoute />}>
-          <Route
-            path="/dashboard"
-            element={<Dashboard />}
-          />
-
-          <Route
-            path="/analyze"
-            element={<AnalyzeIdea />}
-          />
-
-          <Route
-            path="/analysis/:id"
-            element={<AnalysisResults />}
-          />
-          <Route
-            path="/analysis-results/:id"
-            element={<AnalysisResults />}
-          />
-
-          <Route
-            path="/my-ideas"
-            element={<MyIdeas />}
-          />
-
-          <Route
-            path="/compare"
-            element={<CompareIdeas />}
-          />
-
-          <Route
-            path="/agent"
-            element={<Agent />}
-          />
-        </Route>
-      </Routes>
-    </>
-
-
+          {/* Catch-all fallback */}
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </AppShell>
+    </AuthProvider>
   );
 }
 
