@@ -178,11 +178,12 @@ const updateAgentStep = async ({ stepId, runId, userId, updates }) => {
       { returnDocument: "after" }
     );
 
-  if (!result.value) {
+  const doc = result?.value || result;
+  if (!doc) {
     return null;
   }
 
-  return serializeAgentStep(result.value);
+  return serializeAgentStep(doc);
 };
 
 // Indexes for agent_steps

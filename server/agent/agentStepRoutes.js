@@ -2,7 +2,7 @@ import express from "express";
 import { authenticateToken } from "../middleware/authMiddleware.js";
 import { createStep, getSteps } from "./agentStepController.js";
 
-const router = express.Router();
+const router = express.Router({ mergeParams: true });
 
 // POST /api/agent/runs/:runId/steps
 router.post("/", authenticateToken, createStep);
