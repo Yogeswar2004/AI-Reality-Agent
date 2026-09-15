@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect } from "react";
-import { Send, Sparkles, MapPin, AlertCircle } from "lucide-react";
+import { Send, Sparkles, AlertCircle } from "lucide-react";
 import { useAgent } from "../../context/useAgent";
 import MessageBubble from "./MessageBubble";
 import RunControllerBar from "./RunControllerBar";
+import LocationInput from "./LocationInput";
 import Button from "../common/Button";
 
 const PRESET_GOALS = [
@@ -10,21 +11,25 @@ const PRESET_GOALS = [
     label: "Artisanal Bakery",
     goal: "Open an artisanal sourdough bakery and specialty espresso bar",
     location: "Denver, CO",
+    coordinates: { latitude: 39.7392, longitude: -104.9903 },
   },
   {
     label: "AI Code Review SaaS",
     goal: "Build an automated pull request security and code documentation generator",
     location: "",
+    coordinates: null,
   },
   {
     label: "Boutique Climbing Gym",
     goal: "Open a boutique bouldering gym with community workspace",
     location: "Boulder, CO",
+    coordinates: { latitude: 40.015, longitude: -105.2705 },
   },
   {
     label: "Cold-Pressed Juice Delivery",
     goal: "Subscription cold-pressed organic juice delivery service",
     location: "Austin, TX",
+    coordinates: { latitude: 30.2672, longitude: -97.7431 },
   },
 ];
 
@@ -66,7 +71,15 @@ function ConversationFeed() {
   const handleStartSetup = (e) => {
     if (e) e.preventDefault();
     if (!goalInput.trim()) return;
-    startNewInvestigation({ goal: goalInput, location: locationInput });
+
+    let payloadLocation = null;
+    if (locationInput && typeof locationInput === "object") {
+      payloadLocation = locationInput;
+    } else if (typeof locationInput === "string" && locationInput.trim()) {
+      payloadLocation = locationInput.trim();
+    }
+
+    startNewInvestigation({ goal: goalInput, location: payloadLocation });
   };
 
   const handleSendChat = (e) => {
@@ -185,7 +198,15 @@ function ConversationFeed() {
                     type="button"
                     onClick={() => {
                       setGoalInput(preset.goal);
-                      setLocationInput(preset.location);
+                      if (preset.coordinates) {
+                        setLocationInput({
+                          latitude: preset.coordinates.latitude,
+                          longitude: preset.coordinates.longitude,
+                          label: preset.location,
+                        });
+                      } else {
+                        setLocationInput(preset.location);
+                      }
                     }}
                     style={{
                       padding: "6px 12px",
@@ -244,35 +265,11 @@ function ConversationFeed() {
                 />
               </div>
 
-              <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                <label style={{ fontSize: "12px", fontWeight: "600", color: "var(--text-secondary)" }}>
-                  Geographic Location <span style={{ color: "var(--text-muted)", fontWeight: "400" }}>(Required for local business tools)</span>
-                </label>
-                <div style={{ position: "relative" }}>
-                  <MapPin
-                    size={14}
-                    style={{ position: "absolute", left: "12px", top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)" }}
-                  />
-                  <input
-                    type="text"
-                    value={locationInput}
-                    onChange={(e) => setLocationInput(e.target.value)}
-                    placeholder="e.g. Portland, OR or Austin, TX (Leave empty for pure software products)"
-                    disabled={loadingAction === "initializing" || loadingAction === "planning"}
-                    style={{
-                      width: "100%",
-                      background: "var(--bg-input)",
-                      border: "1px solid var(--border-default)",
-                      borderRadius: "var(--radius-md)",
-                      padding: "10px 14px 10px 36px",
-                      color: "var(--text-primary)",
-                      fontSize: "13px",
-                      outline: "none",
-                      boxSizing: "border-box",
-                    }}
-                  />
-                </div>
-              </div>
+              <LocationInput
+                location={locationInput}
+                onChange={setLocationInput}
+                disabled={loadingAction === "initializing" || loadingAction === "planning"}
+              />
 
               <Button
                 type="submit"

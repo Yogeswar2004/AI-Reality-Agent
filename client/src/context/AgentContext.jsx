@@ -249,7 +249,7 @@ export function AgentProvider({ children }) {
       const convRes = await api.post("/agent/conversations", {
         title: goal.trim().slice(0, 55),
         goal: goal.trim(),
-        location: location?.trim() || null,
+        location: typeof location === "string" ? location.trim() || null : location || null,
       });
 
       const { conversation: newConv, run: newRun, message: initialMsg } = convRes.data;

@@ -105,6 +105,7 @@ const KNOWN_COORDINATES = Object.freeze({
   boston: { latitude: 42.3601, longitude: -71.0589 },
   "los angeles": { latitude: 34.0522, longitude: -118.2437 },
   london: { latitude: 51.5074, longitude: -0.1278 },
+  vijayawada: { latitude: 16.5062, longitude: 80.648 },
 });
 
 const resolveCoordinates = (location) => {
@@ -116,10 +117,24 @@ const resolveCoordinates = (location) => {
     if (Number.isFinite(lat) && Number.isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
       return { latitude: lat, longitude: lng };
     }
+    return { ...DEFAULT_COORDINATES };
   }
 
   if (typeof location === "string") {
     const trimmed = location.trim();
+    if (!trimmed) return { ...DEFAULT_COORDINATES };
+
+    // Support parenthesized coordinates, e.g. "Austin, TX (30.267200, -97.743100)"
+    const parenMatch = trimmed.match(/\((-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\)/);
+    if (parenMatch) {
+      const lat = parseFloat(parenMatch[1]);
+      const lng = parseFloat(parenMatch[2]);
+      if (Number.isFinite(lat) && Number.isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
+        return { latitude: lat, longitude: lng };
+      }
+    }
+
+    // Support pure coordinate string, e.g. "30.267200, -97.743100"
     const match = trimmed.match(/^(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)$/);
     if (match) {
       const lat = parseFloat(match[1]);
@@ -152,8 +167,10 @@ const isLocalBusinessGoal = ({ goal, location }) => {
   const hasTechKeyword = TECH_KEYWORDS.some((kw) => cleanGoal.includes(kw));
 
   const hasExplicitCoordinates =
-    (typeof location === "object" && location !== null && Number.isFinite(location.latitude)) ||
-    (typeof location === "string" && /^-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?$/.test(location.trim()));
+    (typeof location === "object" && location !== null && Number.isFinite(Number(location.latitude))) ||
+    (typeof location === "string" &&
+      (/^-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?$/.test(location.trim()) ||
+        /\((-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\)/.test(location.trim())));
 
   if (hasExplicitCoordinates) {
     return !hasTechKeyword || hasLocalKeyword;
@@ -878,4 +895,5 @@ export {
   evaluateNextStep,
   generatePlan,
   generatePlanWithFallback,
+  resolveCoordinates,
 };

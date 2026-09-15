@@ -64,9 +64,20 @@ const createAgentRun = async (req, res) => {
       ? req.body.goal.trim()
       : "";
 
-    const location = typeof req.body.location === "string"
-      ? req.body.location.trim() || null
-      : null;
+    let location = null;
+    if (typeof req.body.location === "string") {
+      location = req.body.location.trim() || null;
+    } else if (typeof req.body.location === "object" && req.body.location !== null) {
+      const lat = Number(req.body.location.latitude);
+      const lng = Number(req.body.location.longitude);
+      if (Number.isFinite(lat) && Number.isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
+        location = {
+          latitude: lat,
+          longitude: lng,
+          label: typeof req.body.location.label === "string" ? req.body.location.label.trim() : null,
+        };
+      }
+    }
 
     if (!goal) {
       return res.status(400).json({
@@ -1473,10 +1484,25 @@ const createConversationHandler = async (req, res) => {
         content: goal.trim(),
       });
 
+      let cleanLocation = null;
+      if (typeof location === "string") {
+        cleanLocation = location.trim() || null;
+      } else if (typeof location === "object" && location !== null) {
+        const lat = Number(location.latitude);
+        const lng = Number(location.longitude);
+        if (Number.isFinite(lat) && Number.isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
+          cleanLocation = {
+            latitude: lat,
+            longitude: lng,
+            label: typeof location.label === "string" ? location.label.trim() : null,
+          };
+        }
+      }
+
       run = await createRun({
         userId,
         goal: goal.trim(),
-        location: typeof location === "string" ? location.trim() || null : null,
+        location: cleanLocation,
         conversationId: conversation._id,
       });
 
