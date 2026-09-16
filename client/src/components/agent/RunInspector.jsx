@@ -145,8 +145,8 @@ function RunInspector() {
                 <div>
                   <span style={{ color: "var(--text-muted)" }}>Target Location: </span>
                   <strong style={{ color: "var(--text-primary)" }}>
-                    {typeof run.location === "object"
-                      ? run.location.label || `${run.location.latitude}, ${run.location.longitude}`
+                    {run.location && typeof run.location === "object"
+                      ? run.location.label || (run.location.latitude != null ? `${run.location.latitude}, ${run.location.longitude}` : "Digital / Global")
                       : run.location || "Digital / Global"}
                   </strong>
                 </div>

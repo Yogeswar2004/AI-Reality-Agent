@@ -39,8 +39,8 @@ function PlanApprovalCard({
             {run?.location && (
               <Badge variant="default" size="xs">
                 <MapPin size={10} style={{ marginRight: "2px" }} />
-                {typeof run.location === "object"
-                  ? run.location.label || `${run.location.latitude}, ${run.location.longitude}`
+                {run.location && typeof run.location === "object"
+                  ? run.location.label || (run.location.latitude != null ? `${run.location.latitude}, ${run.location.longitude}` : String(run.location))
                   : run.location}
               </Badge>
             )}
