@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   APIProvider,
   Map,
@@ -39,32 +39,82 @@ function MapCanvas({
   userLocation,
 }) {
   const map = useMap();
+  const isProgrammaticMoveRef = useRef(false);
+  const isMountedSettledRef = useRef(false);
+  const isUserInteractingRef = useRef(false);
+  const lastCenterRef = useRef(null);
 
-  // Pan map when preset or user GPS location changes
+  // Pan map when preset changes
   useEffect(() => {
-    if (!map) return;
-    if (targetPreset) {
+    if (!map || !targetPreset) return;
+    const currentCenter = map.getCenter();
+    const isAlreadyThere =
+      currentCenter &&
+      Math.abs(currentCenter.lat() - targetPreset.latitude) < 0.0001 &&
+      Math.abs(currentCenter.lng() - targetPreset.longitude) < 0.0001;
+
+    if (!isAlreadyThere) {
+      isProgrammaticMoveRef.current = true;
       map.panTo({ lat: targetPreset.latitude, lng: targetPreset.longitude });
       map.setZoom(13);
     }
   }, [map, targetPreset]);
 
+  // Pan map when user GPS location changes
+  useEffect(() => {
+    if (!map || !userLocation) return;
+    isProgrammaticMoveRef.current = true;
+    map.panTo({ lat: userLocation.latitude, lng: userLocation.longitude });
+    map.setZoom(15);
+  }, [map, userLocation]);
+
+  // Listen to user drag interactions on Google Maps
   useEffect(() => {
     if (!map) return;
-    if (userLocation) {
-      map.panTo({ lat: userLocation.latitude, lng: userLocation.longitude });
-      map.setZoom(15);
-    }
-  }, [map, userLocation]);
+    const dragStartListener = map.addListener("dragstart", () => {
+      isUserInteractingRef.current = true;
+      isProgrammaticMoveRef.current = false;
+    });
+    return () => {
+      if (typeof google !== "undefined" && google?.maps?.event?.removeListener) {
+        google.maps.event.removeListener(dragStartListener);
+      }
+    };
+  }, [map]);
 
   const handleIdle = useCallback(() => {
     if (!map) return;
     const center = map.getCenter();
-    if (center) {
-      onCenterChange({
-        latitude: Number(center.lat().toFixed(6)),
-        longitude: Number(center.lng().toFixed(6)),
-      });
+    if (!center) return;
+
+    const lat = Number(center.lat().toFixed(6));
+    const lng = Number(center.lng().toFixed(6));
+
+    // First idle event on initial mount: mark settled without invalidating preset label
+    if (!isMountedSettledRef.current) {
+      isMountedSettledRef.current = true;
+      lastCenterRef.current = { latitude: lat, longitude: lng };
+      return;
+    }
+
+    // Programmatic move (preset click or GPS pan): consume flag without invalidating label
+    if (isProgrammaticMoveRef.current) {
+      isProgrammaticMoveRef.current = false;
+      lastCenterRef.current = { latitude: lat, longitude: lng };
+      return;
+    }
+
+    // Check if coordinates moved from last recorded center
+    const prev = lastCenterRef.current;
+    const hasMoved =
+      !prev ||
+      Math.abs(lat - prev.latitude) > 0.0001 ||
+      Math.abs(lng - prev.longitude) > 0.0001;
+
+    if (hasMoved || isUserInteractingRef.current) {
+      isUserInteractingRef.current = false;
+      lastCenterRef.current = { latitude: lat, longitude: lng };
+      onCenterChange({ latitude: lat, longitude: lng }, true /* isManual */);
     }
   }, [map, onCenterChange]);
 
@@ -350,6 +400,8 @@ export default function LocationPickerModal({
   useEffect(() => {
     if (!isOpen) return;
     setErrorMessage("");
+    setTargetPreset(null);
+    setUserLocation(null);
 
     if (initialLocation && typeof initialLocation === "object") {
       const lat = Number(initialLocation.latitude);
@@ -391,7 +443,8 @@ export default function LocationPickerModal({
         const gpsCoords = { latitude: lat, longitude: lng };
         setCoords(gpsCoords);
         setUserLocation(gpsCoords);
-        setLabel(`Device Location (${lat}, ${lng})`);
+        setTargetPreset(null);
+        setLabel(`Device Location (${lat.toFixed(4)}, ${lng.toFixed(4)})`);
       },
       (err) => {
         setGeoLoading(false);
@@ -413,6 +466,7 @@ export default function LocationPickerModal({
     const newCoords = { latitude: preset.latitude, longitude: preset.longitude };
     setCoords(newCoords);
     setTargetPreset(newCoords);
+    setUserLocation(null);
   };
 
   // Confirm selection
@@ -466,8 +520,9 @@ export default function LocationPickerModal({
           >
             {PRESET_METROS.map((preset) => {
               const isActive =
-                Math.abs(coords.latitude - preset.latitude) < 0.05 &&
-                Math.abs(coords.longitude - preset.longitude) < 0.05;
+                label === preset.label &&
+                Math.abs(coords.latitude - preset.latitude) < 0.01 &&
+                Math.abs(coords.longitude - preset.longitude) < 0.01;
 
               return (
                 <button
@@ -515,7 +570,16 @@ export default function LocationPickerModal({
             >
               <MapCanvas
                 centerCoords={coords}
-                onCenterChange={(newCoords) => setCoords(newCoords)}
+                onCenterChange={(newCoords, isManual) => {
+                  setCoords(newCoords);
+                  if (isManual) {
+                    const lat = newCoords.latitude;
+                    const lng = newCoords.longitude;
+                    setLabel(`Market Location (${lat.toFixed(4)}, ${lng.toFixed(4)})`);
+                    setTargetPreset(null);
+                    setUserLocation(null);
+                  }
+                }}
                 targetPreset={targetPreset}
                 userLocation={userLocation}
               />

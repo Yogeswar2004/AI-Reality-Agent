@@ -24,6 +24,7 @@ import {
   formatConversationHistoryForPrompt,
   getMessagesByConversationId,
 } from "./agentConversationMessage.js";
+import { formatLocationForPrompt } from "./llmPlanner.js";
 
 const ensureDefaultTools = () => {
   const defaultTools = [
@@ -358,7 +359,7 @@ ${JSON.stringify(evidenceSummary, null, 2)}
 
 <user_goal>
 Goal: ${run?.goal || ""}
-Location: ${run?.location || "Not specified / Global"}
+Location: ${formatLocationForPrompt(run?.location)}
 </user_goal>
 ${clarificationContext}${memoriesContext}${convContext}
 Evaluate the current state and recommend the single next advisory action (EXECUTE_TOOL, RUN_TOOL, TRANSITION_SYNTHESIZING, SYNTHESIZE, ASK_USER, STOP, FAIL, QUOTA_EXHAUSTED, or REPLAN).`;

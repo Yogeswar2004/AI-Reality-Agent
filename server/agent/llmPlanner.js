@@ -34,6 +34,60 @@ const ensureDefaultTools = () => {
 };
 
 /**
+ * Formats a location value (string, structured object, or null) into a clean, normalized
+ * string for prompt construction and planning context.
+ *
+ * Behavior:
+ * - null / undefined / empty: → "Not specified / Global"
+ * - string: → trimmed string or fallback
+ * - structured object with valid label + coordinates: → "Label (lat, lng)"
+ * - structured object with valid coordinates only: → "lat, lng"
+ * - structured object with valid label only: → label
+ * - fallback: → "Not specified / Global"
+ *
+ * @param {string|Object|null} loc
+ * @returns {string}
+ */
+const formatLocationForPrompt = (loc) => {
+  if (!loc) return "Not specified / Global";
+  if (typeof loc === "string") {
+    const trimmed = loc.trim();
+    return trimmed || "Not specified / Global";
+  }
+  if (typeof loc === "object") {
+    const lat = Number(loc.latitude);
+    const lng = Number(loc.longitude);
+    const hasCoords =
+      Number.isFinite(lat) &&
+      Number.isFinite(lng) &&
+      lat >= -90 &&
+      lat <= 90 &&
+      lng >= -180 &&
+      lng <= 180;
+    const label =
+      typeof loc.label === "string" && loc.label.trim()
+        ? loc.label.trim()
+        : null;
+
+    const coordsStr = hasCoords ? `${lat.toFixed(4)}, ${lng.toFixed(4)}` : null;
+
+    if (label && coordsStr) {
+      if (label.includes(`(${coordsStr})`)) {
+        return label;
+      }
+      return `${label} (${coordsStr})`;
+    }
+    if (label) {
+      return label;
+    }
+    if (coordsStr) {
+      return coordsStr;
+    }
+  }
+  return "Not specified / Global";
+};
+
+/**
  * Custom error class for LLM Planner failures.
  */
 class LLMPlannerError extends Error {
@@ -455,7 +509,8 @@ const getMockPlan = ({ goal, location = null, budget = null, availableTools = nu
   }
 
   const cleanGoal = typeof goal === "string" ? goal.trim() : "";
-  const cleanLocation = typeof location === "string" ? location.trim() || null : null;
+  const formattedLocation = formatLocationForPrompt(location);
+  const cleanLocation = formattedLocation !== "Not specified / Global" ? formattedLocation : null;
 
   if (!Array.isArray(availableTools)) {
     ensureDefaultTools();
@@ -477,6 +532,15 @@ const getMockPlan = ({ goal, location = null, budget = null, availableTools = nu
   const steps = [];
 
   if (isLocal && toolIds.has(TOOL_IDS.NEARBY_BUSINESS_SEARCH)) {
+    const lat =
+      typeof location === "object" && location && Number.isFinite(Number(location.latitude))
+        ? Number(location.latitude)
+        : 39.7392;
+    const lng =
+      typeof location === "object" && location && Number.isFinite(Number(location.longitude))
+        ? Number(location.longitude)
+        : -104.9903;
+
     steps.push({
       stepIndex: 1,
       toolId: TOOL_IDS.NEARBY_BUSINESS_SEARCH,
@@ -484,8 +548,8 @@ const getMockPlan = ({ goal, location = null, budget = null, availableTools = nu
       description: `Discover competitors and analyze local density in ${cleanLocation || "target area"}`,
       params: {
         businessType: lower.includes("bakery") ? "bakery" : "local business",
-        latitude: 39.7392,
-        longitude: -104.9903,
+        latitude: lat,
+        longitude: lng,
         radius: 3000,
         limit: 5,
       },
@@ -610,7 +674,8 @@ const generateLLMPlan = async ({
   }
 
   const cleanGoal = goal.trim();
-  const cleanLocation = typeof location === "string" ? location.trim() || null : null;
+  const formattedLocation = formatLocationForPrompt(location);
+  const cleanLocation = formattedLocation !== "Not specified / Global" ? formattedLocation : null;
   if (!Array.isArray(availableTools)) {
     ensureDefaultTools();
   }
@@ -623,7 +688,7 @@ const generateLLMPlan = async ({
   if (process.env.MOCK_MODE === "true" && !budget?.mockScenario && !budget?.mockError) {
     return getMockPlan({
       goal: cleanGoal,
-      location: cleanLocation,
+      location: location || cleanLocation,
       budget,
       availableTools: tools,
     });
@@ -641,7 +706,7 @@ const generateLLMPlan = async ({
         );
         const plan = getMockPlan({
           goal: cleanGoal,
-          location: cleanLocation,
+          location: location || cleanLocation,
           budget: { ...budget, mockScenario: null, mockError: null },
           availableTools: tools,
         });
@@ -652,7 +717,7 @@ const generateLLMPlan = async ({
     try {
       return getMockPlan({
         goal: cleanGoal,
-        location: cleanLocation,
+        location: location || cleanLocation,
         budget,
         availableTools: tools,
       });
@@ -713,7 +778,7 @@ maxSteps: ${maxSteps}
 
 <user_goal>
 Goal: ${cleanGoal}
-Location: ${cleanLocation || "Not specified / Global"}
+Location: ${formattedLocation}
 </user_goal>
 ${memoriesContext}
 Create a structured research plan to rigorously evaluate this venture's market viability.`;
@@ -833,7 +898,8 @@ const getMockReplan = ({
   const replanReason =
     replanDecision?.reason || "Pivoting investigation based on accumulated evidence";
   const cleanGoal = run?.goal || "";
-  const cleanLocation = run?.location || null;
+  const formattedLocation = formatLocationForPrompt(run?.location);
+  const cleanLocation = formattedLocation !== "Not specified / Global" ? formattedLocation : null;
 
   const replacementSteps = [];
 
@@ -1008,7 +1074,7 @@ maxSteps: ${maxSteps}
 
 <user_goal>
 Goal: ${run?.goal || ""}
-Location: ${run?.location || "Not specified / Global"}
+Location: ${formatLocationForPrompt(run?.location)}
 </user_goal>
 
 <replan_context>
@@ -1067,6 +1133,7 @@ Propose a replacement plan to pivot the investigation. You have AT MOST ${remain
 
 export {
   LLMPlannerError,
+  formatLocationForPrompt,
   generateLLMPlan,
   generateLLMReplan,
   validatePlanSchema,
