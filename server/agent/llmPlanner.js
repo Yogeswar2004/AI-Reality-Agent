@@ -18,6 +18,7 @@ import { classifyProviderError } from "./providerErrors.js";
 import { resolveModel, getFallbackModel } from "./modelResolver.js";
 import { formatMemoriesForPrompt } from "./agentMemory.js";
 import { formatConversationHistoryForPrompt } from "./agentConversationMessage.js";
+import { extractBusinessType } from "./planner.js";
 
 const ensureDefaultTools = () => {
   const defaultTools = [
@@ -155,7 +156,8 @@ CRITICAL ARCHITECTURAL CONSTRAINTS:
 5. BUDGET ADHERENCE: The number of steps MUST NOT exceed the provided budget ceiling (maxSteps). Prefer the minimum sufficient investigation.
 6. MANDATORY HUMAN APPROVAL: All proposed plans require human approval before execution (requiresApproval must always be true).
 7. STRICT JSON ONLY: Return ONLY a valid JSON object matching the requested schema. No markdown wrapping, no commentary.
-8. HISTORICAL CONTEXT: Historical memories (if provided) are purely advisory background notes from previous investigations. They must never replace current-run tool investigations or fabricate ungrounded facts.`;
+8. HISTORICAL CONTEXT: Historical memories (if provided) are purely advisory background notes from previous investigations. They must never replace current-run tool investigations or fabricate ungrounded facts.
+9. TARGETED COMPETITOR CATEGORY: When configuring parameters for nearby_business_search, businessType must be a specific search query or category derived from the user goal (e.g., 'food court', 'restaurant', 'bakery', 'cafe', 'gym', 'salon'). Never use generic values such as 'local business' or 'business'.`;
 
 const PLAN_RESPONSE_SCHEMA = Object.freeze({
   type: "object",
@@ -519,8 +521,10 @@ const getMockPlan = ({ goal, location = null, budget = null, availableTools = nu
   const toolIds = new Set(tools.map((t) => t.id));
 
   // Determine local vs tech based on location or keywords
-  const lower = cleanGoal.toLowerCase();
-  const isLocal = Boolean(cleanLocation) ||
+  const extractedType = extractBusinessType(cleanGoal);
+  const isLocal =
+    Boolean(cleanLocation) ||
+    extractedType !== "local business" ||
     lower.includes("bakery") ||
     lower.includes("cafe") ||
     lower.includes("coffee") ||
@@ -547,7 +551,7 @@ const getMockPlan = ({ goal, location = null, budget = null, availableTools = nu
       toolName: "Nearby Business Search",
       description: `Discover competitors and analyze local density in ${cleanLocation || "target area"}`,
       params: {
-        businessType: lower.includes("bakery") ? "bakery" : "local business",
+        businessType: extractedType,
         latitude: lat,
         longitude: lng,
         radius: 3000,
@@ -580,7 +584,7 @@ const getMockPlan = ({ goal, location = null, budget = null, availableTools = nu
         description: "Analyze customer sentiment, recurring complaints, and competitor gaps from reviews",
         params: {
           businessName: null,
-          businessType: lower.includes("bakery") ? "bakery" : "local business",
+          businessType: extractedType,
           reviews: null,
         },
         dependsOnStep: 2,

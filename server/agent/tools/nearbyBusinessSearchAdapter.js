@@ -46,6 +46,13 @@ class NearbyBusinessSearchAdapter extends BaseToolAdapter {
       throw new Error("'businessType' must not exceed 100 characters");
     }
 
+    const trimmedType = businessType.trim().toLowerCase();
+    if (trimmedType === "local business" || trimmedType === "business") {
+      throw new Error(
+        "'businessType' must be a specific category (e.g., 'food court', 'restaurant', 'bakery'), not a generic term like 'local business' or 'business'"
+      );
+    }
+
     if (typeof latitude !== "number" || !Number.isFinite(latitude) || latitude < -90 || latitude > 90) {
       throw new Error("'latitude' must be a valid number between -90 and 90");
     }
@@ -269,7 +276,13 @@ const definition = {
   inputSchema: {
     type: "object",
     properties: {
-      businessType: { type: "string", minLength: 1, maxLength: 100 },
+      businessType: {
+        type: "string",
+        minLength: 1,
+        maxLength: 100,
+        description:
+          "Specific competitor category or search query derived from the user's business goal (e.g., 'food court', 'restaurant', 'bakery', 'cafe', 'gym', 'salon'). Never use generic values like 'local business' or 'business'.",
+      },
       latitude: { type: "number", minimum: -90, maximum: 90 },
       longitude: { type: "number", minimum: -180, maximum: 180 },
       radius: { type: "number", minimum: 100, maximum: 20000 },
