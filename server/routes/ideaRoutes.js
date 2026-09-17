@@ -9,6 +9,10 @@ import localBusinessAnalyzer from "../utils/localBusinessAnalyzer.js";
 
 import aiAnalyzer from "../utils/aiAnalyzer.js";
 import { authenticateToken } from "../middleware/authMiddleware.js";
+import {
+  mapAgentRunToLegacyIdea,
+  cascadeDeleteAgentRun,
+} from "../agent/agentLegacyBridge.js";
 
 const router = express.Router();
 
@@ -116,34 +120,58 @@ router.post("/", authenticateToken, async (req, res) => {
 router.get("/", authenticateToken, async (req, res) => {
   try {
     const db = getDB();
+    const userId = req.user.userId;
 
-
-    const ideas = await db
+    // 1. Fetch user's legacy ideas
+    const legacyIdeas = await db
       .collection("ideas")
       .find({
-        userId: req.user.userId,
+        userId,
       })
       .sort({
         createdAt: -1,
       })
       .toArray();
 
-    return res.status(200).json({
-      success: true,
-      ideas,
+    // 2. Fetch user's agent runs
+    let agentRuns = [];
+    try {
+      agentRuns = await db
+        .collection("agent_runs")
+        .find({
+          userId: String(userId),
+        })
+        .sort({
+          createdAt: -1,
+        })
+        .toArray();
+    } catch (runErr) {
+      console.warn("Failed to fetch agent runs for unified ideas:", runErr.message);
+    }
+
+    // 3. Map agent runs through the bridge
+    const bridgedAgentIdeas = agentRuns
+      .map((run) => mapAgentRunToLegacyIdea(run))
+      .filter(Boolean);
+
+    // 4. Merge and sort chronologically descending
+    const unifiedIdeas = [...legacyIdeas, ...bridgedAgentIdeas].sort((a, b) => {
+      const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return timeB - timeA;
     });
 
-
+    return res.status(200).json({
+      success: true,
+      ideas: unifiedIdeas,
+    });
   } catch (error) {
     console.error("Get ideas error:", error);
-
 
     return res.status(500).json({
       success: false,
       message: "Failed to fetch ideas",
     });
-
-
   }
 });
 
@@ -695,7 +723,6 @@ router.get("/:id", authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
 
-
     if (!ObjectId.isValid(id)) {
       return res.status(400).json({
         success: false,
@@ -704,37 +731,68 @@ router.get("/:id", authenticateToken, async (req, res) => {
     }
 
     const db = getDB();
+    const userId = req.user.userId;
 
+    // 1. Check legacy ideas collection first
     const idea = await db
       .collection("ideas")
       .findOne({
         _id: new ObjectId(id),
-        userId: req.user.userId,
+        userId,
       });
 
-    if (!idea) {
-      return res.status(404).json({
-        success: false,
-        message: "Idea not found",
+    if (idea) {
+      return res.status(200).json({
+        success: true,
+        idea,
       });
     }
 
-    return res.status(200).json({
-      success: true,
-      idea,
+    // 2. Check agent_runs collection
+    const agentRun = await db
+      .collection("agent_runs")
+      .findOne({
+        _id: new ObjectId(id),
+        userId: String(userId),
+      });
+
+    if (agentRun) {
+      // If completed or local, fetch linked evidence for detailed analysis view
+      let evidenceList = [];
+      try {
+        evidenceList = await db
+          .collection("agent_evidence")
+          .find({
+            runId: new ObjectId(id),
+            userId: String(userId),
+          })
+          .toArray();
+      } catch (evErr) {
+        // Non-fatal
+      }
+
+      const mappedIdea = mapAgentRunToLegacyIdea(agentRun, {
+        detailed: true,
+        evidenceList,
+      });
+
+      return res.status(200).json({
+        success: true,
+        idea: mappedIdea,
+      });
+    }
+
+    return res.status(404).json({
+      success: false,
+      message: "Idea not found",
     });
-
-
   } catch (error) {
     console.error("Get idea error:", error);
-
 
     return res.status(500).json({
       success: false,
       message: "Failed to fetch idea",
     });
-
-
   }
 });
 
@@ -747,7 +805,6 @@ router.delete("/:id", authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
 
-
     if (!ObjectId.isValid(id)) {
       return res.status(400).json({
         success: false,
@@ -756,37 +813,69 @@ router.delete("/:id", authenticateToken, async (req, res) => {
     }
 
     const db = getDB();
+    const userId = req.user.userId;
 
-    const result = await db
+    // 1. Check legacy ideas collection first
+    const legacyIdea = await db
       .collection("ideas")
-      .deleteOne({
+      .findOne({
         _id: new ObjectId(id),
-        userId: req.user.userId,
+        userId,
       });
 
-    if (result.deletedCount === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Idea not found",
+    if (legacyIdea) {
+      const result = await db
+        .collection("ideas")
+        .deleteOne({
+          _id: new ObjectId(id),
+          userId,
+        });
+
+      if (result.deletedCount === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Idea not found",
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: "Idea deleted successfully",
       });
     }
 
-    return res.status(200).json({
-      success: true,
-      message: "Idea deleted successfully",
+    // 2. Check agent_runs collection
+    const agentRun = await db
+      .collection("agent_runs")
+      .findOne({
+        _id: new ObjectId(id),
+        userId: String(userId),
+      });
+
+    if (agentRun) {
+      await cascadeDeleteAgentRun({
+        runId: id,
+        userId,
+        db,
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: "Idea deleted successfully",
+      });
+    }
+
+    return res.status(404).json({
+      success: false,
+      message: "Idea not found",
     });
-
-
   } catch (error) {
     console.error("Delete idea error:", error);
-
 
     return res.status(500).json({
       success: false,
       message: "Failed to delete idea",
     });
-
-
   }
 });
 router.post(

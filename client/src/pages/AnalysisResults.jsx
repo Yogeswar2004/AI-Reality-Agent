@@ -245,7 +245,11 @@ const AnalysisResults = () => {
                 ? styles.analyzeButtonDisabled
                 : {}),
             }}
-            onClick={handleAnalyze}
+            onClick={
+              idea.source === "agent_studio" || idea.isAgentRun
+                ? () => navigate(`/agent?runId=${idea._id}`)
+                : handleAnalyze
+            }
             disabled={analyzing}
           >
             <span style={styles.buttonIcon}>
@@ -254,11 +258,71 @@ const AnalysisResults = () => {
 
             {analyzing
               ? "Analyzing with AI..."
+              : idea.source === "agent_studio" || idea.isAgentRun
+              ? analysis
+                ? "Open in Agent Studio"
+                : "Resume in Studio"
               : analysis
               ? "Analyze Again"
               : "Analyze Idea"}
           </button>
         </div>
+
+        {/* AGENT STUDIO BANNER */}
+        {(idea.source === "agent_studio" || idea.isAgentRun) && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: "14px 18px",
+              marginBottom: "20px",
+              borderRadius: "12px",
+              background: "rgba(139, 92, 246, 0.1)",
+              border: "1px solid rgba(139, 92, 246, 0.25)",
+              color: "var(--text-primary, #ffffff)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+              <span style={{ fontSize: "22px" }}>🤖</span>
+              <div>
+                <div
+                  style={{
+                    fontWeight: "700",
+                    fontSize: "14px",
+                    color: "var(--primary-light, #a78bfa)",
+                  }}
+                >
+                  Agent Studio Investigation
+                </div>
+                <div
+                  style={{
+                    fontSize: "12px",
+                    color: "var(--text-secondary, #94a3b8)",
+                  }}
+                >
+                  Evidence-grounded autonomous analysis with verified multi-step tool findings.
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              style={{
+                padding: "6px 14px",
+                borderRadius: "8px",
+                background: "linear-gradient(135deg, #7c3aed 0%, #4f46e5 100%)",
+                color: "#ffffff",
+                border: "none",
+                fontSize: "12px",
+                fontWeight: "700",
+                cursor: "pointer",
+              }}
+              onClick={() => navigate(`/agent?runId=${idea._id}`)}
+            >
+              View in Studio →
+            </button>
+          </div>
+        )}
 
         {/* =====================================================
             IDEA CARD
@@ -267,6 +331,19 @@ const AnalysisResults = () => {
         <div style={styles.ideaCard}>
           <div style={styles.ideaCardTop}>
             <div style={styles.badgeGroup}>
+              {(idea.source === "agent_studio" || idea.isAgentRun) && (
+                <span
+                  style={{
+                    ...styles.category,
+                    background: "rgba(139, 92, 246, 0.15)",
+                    color: "var(--primary-light, #a78bfa)",
+                    border: "1px solid rgba(139, 92, 246, 0.3)",
+                  }}
+                >
+                  🤖 AGENT STUDIO
+                </span>
+              )}
+
               <span style={styles.category}>
                 {idea.category || "General"}
               </span>
@@ -348,11 +425,17 @@ const AnalysisResults = () => {
 
             <button
               style={styles.primaryButton}
-              onClick={handleAnalyze}
+              onClick={
+                idea.source === "agent_studio" || idea.isAgentRun
+                  ? () => navigate(`/agent?runId=${idea._id}`)
+                  : handleAnalyze
+              }
               disabled={analyzing}
             >
               {analyzing
                 ? "Analyzing..."
+                : idea.source === "agent_studio" || idea.isAgentRun
+                ? "Resume Investigation in Agent Studio →"
                 : "Start AI Analysis →"}
             </button>
           </div>
@@ -397,13 +480,36 @@ const TechAnalysis = ({ analysis }) => {
 
         <div style={styles.scoreCircle}>
           <div style={styles.scoreCircleInner}>
-            <span style={styles.scoreNumber}>
-              {analysis.overallScore ?? 0}
-            </span>
+            {analysis.isAgentResult ? (
+              <>
+                <span
+                  style={{
+                    ...styles.scoreNumber,
+                    fontSize: "20px",
+                    color: "var(--primary-light, #a78bfa)",
+                  }}
+                >
+                  {analysis.confidenceScore !== null &&
+                  analysis.confidenceScore !== undefined
+                    ? `${analysis.confidenceScore}/10`
+                    : "AGENT"}
+                </span>
 
-            <span style={styles.scoreOutOf}>
-              / 100
-            </span>
+                <span style={{ ...styles.scoreOutOf, fontSize: "10px" }}>
+                  CONFIDENCE
+                </span>
+              </>
+            ) : (
+              <>
+                <span style={styles.scoreNumber}>
+                  {analysis.overallScore ?? 0}
+                </span>
+
+                <span style={styles.scoreOutOf}>
+                  / 100
+                </span>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -709,17 +815,44 @@ const LocalAnalysis = ({ analysis }) => {
         </div>
 
         <div style={styles.opportunityCircle}>
-          <span style={styles.opportunityNumber}>
-            {analysis.opportunityScore ?? 0}
-          </span>
+          {analysis.isAgentResult ? (
+            <>
+              <span
+                style={{
+                  ...styles.opportunityNumber,
+                  fontSize: "22px",
+                  color: "var(--primary-light, #a78bfa)",
+                }}
+              >
+                {analysis.confidenceScore !== null &&
+                analysis.confidenceScore !== undefined
+                  ? `${analysis.confidenceScore}/10`
+                  : "AGENT"}
+              </span>
 
-          <span style={styles.opportunityLabel}>
-            / 100
-          </span>
+              <span style={{ ...styles.opportunityLabel, fontSize: "10px" }}>
+                CONFIDENCE
+              </span>
 
-          <span style={styles.opportunityText}>
-            OPPORTUNITY
-          </span>
+              <span style={styles.opportunityText}>
+                EVIDENCE
+              </span>
+            </>
+          ) : (
+            <>
+              <span style={styles.opportunityNumber}>
+                {analysis.opportunityScore ?? 0}
+              </span>
+
+              <span style={styles.opportunityLabel}>
+                / 100
+              </span>
+
+              <span style={styles.opportunityText}>
+                OPPORTUNITY
+              </span>
+            </>
+          )}
         </div>
       </div>
 
@@ -744,7 +877,14 @@ const LocalAnalysis = ({ analysis }) => {
         <StatCard
           icon="⚡"
           title="Competition Score"
-          value={`${analysis.competitionScore ?? competition.score ?? 0}/100`}
+          value={
+            (analysis.competitionScore ?? competition.score) !== null &&
+            (analysis.competitionScore ?? competition.score) !== undefined
+              ? `${analysis.competitionScore ?? competition.score}/100`
+              : analysis.isAgentResult
+              ? "Evaluated"
+              : "0/100"
+          }
         />
 
         <StatCard
@@ -753,7 +893,7 @@ const LocalAnalysis = ({ analysis }) => {
           value={
             analysis.competitionLevel ||
             competition.level ||
-            "Unknown"
+            (analysis.isAgentResult ? "Observed" : "Unknown")
           }
         />
 
@@ -779,7 +919,11 @@ const LocalAnalysis = ({ analysis }) => {
           icon="●"
           title="Within 500m"
           value={
-            competition.within500m ?? 0
+            competition.within500m !== null && competition.within500m !== undefined
+              ? competition.within500m
+              : analysis.isAgentResult
+              ? "—"
+              : 0
           }
         />
 
@@ -787,7 +931,11 @@ const LocalAnalysis = ({ analysis }) => {
           icon="●"
           title="Within 1km"
           value={
-            competition.within1km ?? 0
+            competition.within1km !== null && competition.within1km !== undefined
+              ? competition.within1km
+              : analysis.isAgentResult
+              ? "—"
+              : 0
           }
         />
 
@@ -795,7 +943,11 @@ const LocalAnalysis = ({ analysis }) => {
           icon="●"
           title="Within 3km"
           value={
-            competition.within3km ?? 0
+            competition.within3km !== null && competition.within3km !== undefined
+              ? competition.within3km
+              : analysis.isAgentResult
+              ? "—"
+              : 0
           }
         />
       </div>

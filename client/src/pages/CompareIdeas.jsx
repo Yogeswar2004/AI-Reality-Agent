@@ -128,6 +128,10 @@ function CompareIdeas() {
         idea.analysis?.competitionScore ??
         idea.analysis?.competition?.score;
 
+      if (score === null || score === undefined) {
+        return null;
+      }
+
       return Number.isFinite(Number(score))
         ? Number(score)
         : null;
@@ -148,6 +152,10 @@ function CompareIdeas() {
     const score =
       idea.analysis?.overallScore ??
       idea.analysis?.opportunityScore;
+
+    if (score === null || score === undefined) {
+      return null;
+    }
 
     return Number.isFinite(Number(score))
       ? Number(score)
@@ -393,7 +401,7 @@ function CompareIdeas() {
                     key={idea._id}
                     value={idea._id}
                   >
-                    {idea.title}
+                    {idea.source === "agent_studio" ? `🤖 [Agent] ${idea.title}` : idea.title}
                   </option>
                 ))}
               </select>
@@ -428,7 +436,7 @@ function CompareIdeas() {
                       firstIdeaId
                     }
                   >
-                    {idea.title}
+                    {idea.source === "agent_studio" ? `🤖 [Agent] ${idea.title}` : idea.title}
                   </option>
                 ))}
               </select>
@@ -466,25 +474,43 @@ function CompareIdeas() {
                     {ideaOne.title}
                   </h2>
 
-                  <div style={styles.scoreHeading}>
-                    <span style={styles.scoreNumber}>
-                      {overallOne !== null
-                        ? overallOne
-                        : "—"}
-                    </span>
+                  {ideaOne.source === "agent_studio" || ideaOne.isAgentRun ? (
+                    <>
+                      <div style={styles.scoreHeading}>
+                        <span style={{ ...styles.scoreNumber, fontSize: "26px", color: "var(--primary-light, #a78bfa)" }}>
+                          {ideaOne.analysis?.confidenceScore !== null && ideaOne.analysis?.confidenceScore !== undefined
+                            ? `${ideaOne.analysis.confidenceScore}/10`
+                            : (ideaOne.agentState ? ideaOne.agentState.toUpperCase() : "AGENT")}
+                        </span>
+                      </div>
 
-                    <span style={styles.scoreMax}>
-                      /100
-                    </span>
-                  </div>
+                      <div style={styles.scoreCaption}>
+                        {ideaOne.analysis?.verdict ? `VERDICT: ${ideaOne.analysis.verdict}` : "AGENT CONFIDENCE"}
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div style={styles.scoreHeading}>
+                        <span style={styles.scoreNumber}>
+                          {overallOne !== null
+                            ? overallOne
+                            : "—"}
+                        </span>
 
-                  <div style={styles.scoreCaption}>
-                    OVERALL OPPORTUNITY
-                  </div>
+                        <span style={styles.scoreMax}>
+                          /100
+                        </span>
+                      </div>
+
+                      <div style={styles.scoreCaption}>
+                        OVERALL OPPORTUNITY
+                      </div>
+                    </>
+                  )}
 
                   {!ideaOne.analysis && (
                     <div style={styles.notAnalyzed}>
-                      Not analyzed yet
+                      {ideaOne.source === "agent_studio" ? (ideaOne.agentState || "Incomplete run") : "Not analyzed yet"}
                     </div>
                   )}
                 </div>
@@ -527,25 +553,43 @@ function CompareIdeas() {
                     {ideaTwo.title}
                   </h2>
 
-                  <div style={styles.scoreHeading}>
-                    <span style={styles.scoreNumber}>
-                      {overallTwo !== null
-                        ? overallTwo
-                        : "—"}
-                    </span>
+                  {ideaTwo.source === "agent_studio" || ideaTwo.isAgentRun ? (
+                    <>
+                      <div style={styles.scoreHeading}>
+                        <span style={{ ...styles.scoreNumber, fontSize: "26px", color: "var(--primary-light, #a78bfa)" }}>
+                          {ideaTwo.analysis?.confidenceScore !== null && ideaTwo.analysis?.confidenceScore !== undefined
+                            ? `${ideaTwo.analysis.confidenceScore}/10`
+                            : (ideaTwo.agentState ? ideaTwo.agentState.toUpperCase() : "AGENT")}
+                        </span>
+                      </div>
 
-                    <span style={styles.scoreMax}>
-                      /100
-                    </span>
-                  </div>
+                      <div style={styles.scoreCaption}>
+                        {ideaTwo.analysis?.verdict ? `VERDICT: ${ideaTwo.analysis.verdict}` : "AGENT CONFIDENCE"}
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div style={styles.scoreHeading}>
+                        <span style={styles.scoreNumber}>
+                          {overallTwo !== null
+                            ? overallTwo
+                            : "—"}
+                        </span>
 
-                  <div style={styles.scoreCaption}>
-                    OVERALL OPPORTUNITY
-                  </div>
+                        <span style={styles.scoreMax}>
+                          /100
+                        </span>
+                      </div>
+
+                      <div style={styles.scoreCaption}>
+                        OVERALL OPPORTUNITY
+                      </div>
+                    </>
+                  )}
 
                   {!ideaTwo.analysis && (
                     <div style={styles.notAnalyzed}>
-                      Not analyzed yet
+                      {ideaTwo.source === "agent_studio" ? (ideaTwo.agentState || "Incomplete run") : "Not analyzed yet"}
                     </div>
                   )}
                 </div>
@@ -797,13 +841,15 @@ function CompareIdeas() {
                   ) : overallWinner === "none" ? (
                     <>
                       <h2 style={styles.resultTitle}>
-                        Analysis Required
+                        {ideaOne?.source === "agent_studio" || ideaTwo?.source === "agent_studio" || ideaOne?.isAgentRun || ideaTwo?.isAgentRun
+                          ? "Agent Studio Comparison"
+                          : "Analysis Required"}
                       </h2>
 
                       <p style={styles.resultText}>
-                        Analyze both ideas first to
-                        determine which opportunity
-                        has the stronger overall score.
+                        {ideaOne?.source === "agent_studio" || ideaTwo?.source === "agent_studio" || ideaOne?.isAgentRun || ideaTwo?.isAgentRun
+                          ? "Numerical score comparison is unavailable for Agent Studio investigations. Agent Studio evaluates ideas through evidence-grounded qualitative verdicts and verification confidence rather than legacy 0–100 viability scores."
+                          : "Analyze both ideas first to determine which opportunity has the stronger overall score."}
                       </p>
                     </>
                   ) : (

@@ -32,8 +32,8 @@ function App() {
             <Route path="/compare" element={<CompareIdeas />} />
             <Route path="/profile" element={<Profile />} />
 
-            {/* Legacy Reality Analyzer Routes */}
-            <Route path="/analyze" element={<AnalyzeIdea />} />
+            {/* Legacy Reality Analyzer Routes (Redirected to Agent Studio) */}
+            <Route path="/analyze" element={<Navigate to="/agent" replace />} />
             <Route path="/analysis/:id" element={<AnalysisResults />} />
             <Route path="/analysis-results/:id" element={<AnalysisResults />} />
           </Route>

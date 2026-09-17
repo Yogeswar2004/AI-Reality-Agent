@@ -60,6 +60,10 @@ function Dashboard() {
       idea.analysis?.overallScore ??
       idea.analysis?.opportunityScore;
 
+    if (score === null || score === undefined) {
+      return null;
+    }
+
     return Number.isFinite(Number(score))
       ? Number(score)
       : null;
@@ -218,7 +222,7 @@ function Dashboard() {
                 ✦ Launch AI Agent
               </Link>
               <Link
-                to="/analyze"
+                to="/agent"
                 style={{
                   ...styles.analyzeButton,
                   background: "var(--bg-elevated)",
@@ -406,7 +410,7 @@ function Dashboard() {
                 </p>
 
                 <Link
-                  to="/analyze"
+                  to="/agent"
                   style={styles.emptyButton}
                 >
                   Analyze Your First Idea →
@@ -418,12 +422,16 @@ function Dashboard() {
                 className="dashboard-ideas-list"
               >
                 {ideas.slice(0, 5).map((idea) => {
-                  const score =
-                    getOverallScore(idea);
+                  const score = getOverallScore(idea);
+                  const isAgent = idea.source === "agent_studio" || idea.isAgentRun;
+                  const targetLink =
+                    isAgent && idea.agentState && idea.agentState !== "completed"
+                      ? `/agent?runId=${idea._id}`
+                      : `/analysis/${idea._id}`;
 
                   return (
                     <Link
-                      to={`/analysis/${idea._id}`}
+                      to={targetLink}
                       style={styles.ideaCard}
                       className="dashboard-idea-card"
                       key={idea._id}
@@ -436,6 +444,19 @@ function Dashboard() {
                             styles.ideaBadges
                           }
                         >
+                          {isAgent && (
+                            <span
+                              style={{
+                                ...styles.categoryBadge,
+                                background: "rgba(139, 92, 246, 0.15)",
+                                color: "var(--primary-light, #a78bfa)",
+                                border: "1px solid rgba(139, 92, 246, 0.3)",
+                              }}
+                            >
+                              🤖 AGENT STUDIO
+                            </span>
+                          )}
+
                           <span
                             style={
                               styles.categoryBadge
@@ -456,15 +477,28 @@ function Dashboard() {
                             </span>
                           )}
 
-                          {idea.analysis && (
+                          {idea.analysis ? (
                             <span
                               style={
                                 styles.analyzedBadge
                               }
                             >
-                              ANALYZED
+                              {isAgent && idea.analysis.verdict
+                                ? idea.analysis.verdict
+                                : "ANALYZED"}
                             </span>
-                          )}
+                          ) : isAgent && idea.agentState ? (
+                            <span
+                              style={{
+                                ...styles.categoryBadge,
+                                background: "rgba(59, 130, 246, 0.12)",
+                                color: "#60a5fa",
+                                border: "1px solid rgba(59, 130, 246, 0.25)",
+                              }}
+                            >
+                              {idea.agentState.toUpperCase().replace(/_/g, " ")}
+                            </span>
+                          ) : null}
                         </div>
 
                         <h3
@@ -498,32 +532,84 @@ function Dashboard() {
                           styles.ideaScoreContainer
                         }
                       >
-                        <span
-                          style={
-                            styles.ideaScoreLabel
-                          }
-                        >
-                          SCORE
-                        </span>
+                        {isAgent ? (
+                          <div style={{ textAlign: "right" }}>
+                            <span
+                              style={
+                                styles.ideaScoreLabel
+                              }
+                            >
+                              {idea.analysis ? "CONFIDENCE" : "AGENT STATE"}
+                            </span>
 
-                        <div
-                          style={
-                            styles.ideaScore
-                          }
-                        >
-                          {score !== null
-                            ? score
-                            : "--"}
-                        </div>
+                            <div
+                              style={{
+                                ...styles.ideaScore,
+                                fontSize:
+                                  idea.analysis?.confidenceScore !== null &&
+                                  idea.analysis?.confidenceScore !== undefined
+                                    ? "20px"
+                                    : "13px",
+                                color: "var(--primary-light, #a78bfa)",
+                              }}
+                            >
+                              {idea.analysis?.confidenceScore !== null &&
+                              idea.analysis?.confidenceScore !== undefined
+                                ? `${idea.analysis.confidenceScore}/10`
+                                : idea.agentState
+                                ? idea.agentState.toUpperCase().replace(/_/g, " ")
+                                : "AGENT"}
+                            </div>
 
-                        {score !== null && (
-                          <span
-                            style={
-                              styles.ideaScoreMax
-                            }
-                          >
-                            /100
-                          </span>
+                            {idea.analysis?.verdict && (
+                              <span
+                                style={{
+                                  display: "block",
+                                  fontSize: "11px",
+                                  fontWeight: "700",
+                                  marginTop: "2px",
+                                  color:
+                                    idea.analysis.verdict === "VIABLE"
+                                      ? "#10b981"
+                                      : idea.analysis.verdict === "HIGH_RISK"
+                                      ? "#ef4444"
+                                      : "#f59e0b",
+                                }}
+                              >
+                                {idea.analysis.verdict}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <>
+                            <span
+                              style={
+                                styles.ideaScoreLabel
+                              }
+                            >
+                              SCORE
+                            </span>
+
+                            <div
+                              style={
+                                styles.ideaScore
+                              }
+                            >
+                              {score !== null
+                                ? score
+                                : "--"}
+                            </div>
+
+                            {score !== null && (
+                              <span
+                                style={
+                                  styles.ideaScoreMax
+                                }
+                              >
+                                /100
+                              </span>
+                            )}
+                          </>
                         )}
                       </div>
 
@@ -655,7 +741,7 @@ function Dashboard() {
               className="dashboard-action-grid"
             >
               <Link
-                to="/analyze"
+                to="/agent"
                 style={styles.actionCard}
               >
                 <div style={styles.actionIcon}>

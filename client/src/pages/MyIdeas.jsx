@@ -120,7 +120,7 @@ function MyIdeas() {
           </div>
 
           <Link
-            to="/analyze"
+            to="/agent"
             className="my-ideas-analyze-button"
           >
             <span>+</span>
@@ -170,7 +170,7 @@ function MyIdeas() {
             </p>
 
             <Link
-              to="/analyze"
+              to="/agent"
               className="my-ideas-empty-button"
             >
               Analyze Your First Idea
@@ -198,6 +198,7 @@ function MyIdeas() {
             {/* IDEAS GRID */}
             <div className="my-ideas-grid">
               {ideas.map((idea) => {
+                const isAgent = idea.source === "agent_studio" || idea.isAgentRun;
                 const isAnalyzed = Boolean(
                   idea.analysis
                 );
@@ -215,17 +216,6 @@ function MyIdeas() {
 
                 /*
                  * Competition score
-                 *
-                 * Local analysis can store it in either:
-                 *
-                 * idea.analysis.competition.score
-                 *
-                 * or
-                 *
-                 * idea.analysis.competitionScore
-                 *
-                 * We support both so the UI remains compatible
-                 * with your existing backend.
                  */
                 const competitionScore = isLocal
                   ? (
@@ -235,12 +225,32 @@ function MyIdeas() {
                   )
                   : null;
 
-                const competitionLevel = isLocal
+                const rawLevel = isLocal
                   ? (
                     idea.analysis?.competition?.level ??
                     null
                   )
                   : null;
+
+                const competitionLevel =
+                  typeof rawLevel === "string" ? rawLevel : null;
+
+                const density = isLocal
+                  ? (
+                    (rawLevel && typeof rawLevel === "object")
+                      ? rawLevel
+                      : (idea.analysis?.localEvidence?.competitorDensity && typeof idea.analysis?.localEvidence?.competitorDensity === "object")
+                      ? idea.analysis.localEvidence.competitorDensity
+                      : null
+                  )
+                  : null;
+
+                const hasDensity = Boolean(
+                  density &&
+                  (density.within500m !== undefined ||
+                   density.within1km !== undefined ||
+                   density.within3km !== undefined)
+                );
 
                 return (
                   <div
@@ -255,8 +265,25 @@ function MyIdeas() {
                     <div className="my-idea-card-top">
 
                       <div className="my-idea-tags">
+                        {isAgent && (
+                          <span
+                            className="my-idea-agent"
+                            style={{
+                              background: "rgba(139, 92, 246, 0.15)",
+                              color: "var(--primary-light, #a78bfa)",
+                              border: "1px solid rgba(139, 92, 246, 0.3)",
+                              borderRadius: "var(--radius-xs)",
+                              padding: "2px 8px",
+                              fontSize: "11px",
+                              fontWeight: "700",
+                            }}
+                          >
+                            🤖 Agent Studio
+                          </span>
+                        )}
+
                         <span className="my-idea-category">
-                          {idea.category || "General"}
+                          {idea.businessType || idea.category || "General"}
                         </span>
 
                         {isLocal && (
@@ -266,19 +293,71 @@ function MyIdeas() {
                         )}
                       </div>
 
-                      {/* OVERALL SCORE */}
-                      <div
-                        className={`my-idea-score ${isAnalyzed ? "has-score" : "no-score"
+                      {/* OVERALL SCORE / CONFIDENCE */}
+                      {isAgent ? (
+                        <div
+                          className={`my-idea-score ${
+                            isAnalyzed ? "has-score" : "no-score"
                           }`}
-                      >
-                        <div className="score-number">
-                          {overallScore ?? "--"}
+                          style={{ minWidth: "90px", padding: "6px 10px" }}
+                        >
+                          {isAnalyzed ? (
+                            <>
+                              <div
+                                className="score-number"
+                                style={{
+                                  fontSize: "16px",
+                                  color: "var(--primary-light, #a78bfa)",
+                                }}
+                              >
+                                {idea.analysis?.confidenceScore !== null &&
+                                idea.analysis?.confidenceScore !== undefined
+                                  ? `${idea.analysis.confidenceScore}/10`
+                                  : "VERIFIED"}
+                              </div>
+                              <div
+                                className="score-total"
+                                style={{ fontSize: "9px" }}
+                              >
+                                CONFIDENCE
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <div
+                                className="score-number"
+                                style={{ fontSize: "11px", color: "#60a5fa" }}
+                              >
+                                {idea.agentState
+                                  ? idea.agentState
+                                      .toUpperCase()
+                                      .replace(/_/g, " ")
+                                  : "AGENT"}
+                              </div>
+                              <div
+                                className="score-total"
+                                style={{ fontSize: "9px" }}
+                              >
+                                STATUS
+                              </div>
+                            </>
+                          )}
                         </div>
+                      ) : (
+                        <div
+                          className={`my-idea-score ${
+                            isAnalyzed ? "has-score" : "no-score"
+                          }`}
+                        >
+                          <div className="score-number">
+                            {overallScore ?? "--"}
+                          </div>
 
-                        <div className="score-total">
-                          /100
+                          <div className="score-total">
+                            /100
+                          </div>
                         </div>
-                      </div>
+                      )}
                     </div>
 
                     {/* TITLE */}
@@ -313,14 +392,20 @@ function MyIdeas() {
                             </span>
                           </div>
 
-                          <div className="local-analysis-score">
-                            {competitionScore !==
-                              null
+                          <div
+                            className="local-analysis-score"
+                            style={
+                              isAgent && competitionScore === null && !competitionLevel
+                                ? { fontSize: "16px" }
+                                : undefined
+                            }
+                          >
+                            {competitionScore !== null
                               ? `${competitionScore}/100`
-                              : "--"}
+                              : competitionLevel || (isAgent ? "Evaluated" : "--")}
                           </div>
 
-                          {competitionLevel && (
+                          {competitionLevel && competitionScore !== null && (
                             <div
                               className={`competition-level ${competitionLevel
                                 .toLowerCase()
@@ -330,6 +415,25 @@ function MyIdeas() {
                                 )}`}
                             >
                               {competitionLevel}
+                            </div>
+                          )}
+
+                          {hasDensity && (
+                            <div
+                              className="local-analysis-density"
+                              style={{
+                                marginTop: "6px",
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: "2px",
+                                fontSize: "11px",
+                                color: "#a8a1b5",
+                                lineHeight: "1.4",
+                              }}
+                            >
+                              <span>500m: {density.within500m ?? 0}</span>
+                              <span>1km: {density.within1km ?? 0}</span>
+                              <span>3km: {density.within3km ?? 0}</span>
                             </div>
                           )}
                         </div>
@@ -375,7 +479,13 @@ function MyIdeas() {
                       >
                         <span className="status-dot" />
 
-                        {isAnalyzed
+                        {isAgent
+                          ? isAnalyzed
+                            ? `Verdict: ${idea.analysis?.verdict || "Complete"}`
+                            : idea.agentState
+                            ? `Agent: ${idea.agentState.replace(/_/g, " ")}`
+                            : "Investigation Pending"
+                          : isAnalyzed
                           ? "Analysis complete"
                           : "Not analyzed"}
                       </span>
@@ -389,21 +499,56 @@ function MyIdeas() {
                             </strong>
                           </span>
                         )}
+
+                      {isAgent &&
+                        isAnalyzed &&
+                        idea.analysis?.verdict && (
+                          <span
+                            style={{
+                              marginLeft: "auto",
+                              fontSize: "11px",
+                              fontWeight: "700",
+                              color:
+                                idea.analysis.verdict === "VIABLE"
+                                  ? "#10b981"
+                                  : idea.analysis.verdict === "HIGH_RISK"
+                                  ? "#ef4444"
+                                  : "#f59e0b",
+                            }}
+                          >
+                            {idea.analysis.verdict}
+                          </span>
+                        )}
                     </div>
 
                     {/* ACTIONS */}
                     <div className="my-idea-actions">
 
-                      <Link
-                        to={`/analysis/${idea._id}`}
-                        className="my-idea-view-button"
-                      >
-                        {isAnalyzed
-                          ? "View Analysis"
-                          : "Analyze Idea"}
-
-                        <span>→</span>
-                      </Link>
+                      {isAgent && !isAnalyzed ? (
+                        <Link
+                          to={`/agent?runId=${idea._id}`}
+                          className="my-idea-view-button"
+                        >
+                          {idea.agentState === "executing"
+                            ? "View Live Progress"
+                            : idea.agentState === "awaiting_approval"
+                            ? "Review Plan"
+                            : idea.agentState === "awaiting_clarification"
+                            ? "Answer Agent"
+                            : "Open in Studio"}
+                          <span>→</span>
+                        </Link>
+                      ) : (
+                        <Link
+                          to={`/analysis/${idea._id}`}
+                          className="my-idea-view-button"
+                        >
+                          {isAnalyzed
+                            ? "View Analysis"
+                            : "Analyze Idea"}
+                          <span>→</span>
+                        </Link>
+                      )}
 
                       <button
                         type="button"
