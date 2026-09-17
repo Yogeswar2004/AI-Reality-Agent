@@ -25,6 +25,7 @@ import {
   getMessagesByConversationId,
 } from "./agentConversationMessage.js";
 import { formatLocationForPrompt } from "./llmPlanner.js";
+import { extractBusinessType, resolveCoordinates } from "./planner.js";
 
 const ensureDefaultTools = () => {
   const defaultTools = [
@@ -314,6 +315,9 @@ const formatDecisionPromptContext = ({
           toolId: s.toolId,
           description: s.description,
           dependsOnStep: s.dependsOnStep,
+          ...(s.params && typeof s.params === "object" && Object.keys(s.params).length > 0
+            ? { params: s.params }
+            : {}),
         })),
       }
     : null;
@@ -597,6 +601,78 @@ const validateDecisionSchema = (decision, options = {}) => {
           "MISSING_BUSINESS_NAME",
           400
         );
+      }
+    }
+
+    // Evidence / Input Grounding Firewall for nearby_business_search
+    if (cleanToolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH) {
+      const isGeneric = (val) =>
+        typeof val === "string" &&
+        (val.trim().toLowerCase() === "local business" ||
+          val.trim().toLowerCase() === "business");
+
+      if (
+        typeof decision.input?.businessType !== "string" ||
+        !decision.input.businessType.trim() ||
+        isGeneric(decision.input.businessType)
+      ) {
+        if (run?.goal) {
+          decision.input = decision.input || {};
+          decision.input.businessType = extractBusinessType(run.goal);
+        } else {
+          throw new LLMDecisionError(
+            "businessType is required in input for nearby_business_search and must be a specific category",
+            "MISSING_BUSINESS_TYPE",
+            400
+          );
+        }
+      } else {
+        decision.input.businessType = decision.input.businessType.trim();
+      }
+
+      if (
+        typeof decision.input?.latitude !== "number" ||
+        !Number.isFinite(decision.input.latitude) ||
+        typeof decision.input?.longitude !== "number" ||
+        !Number.isFinite(decision.input.longitude)
+      ) {
+        if (run?.location) {
+          const coords = resolveCoordinates(run.location);
+          decision.input = decision.input || {};
+          if (
+            typeof decision.input.latitude !== "number" ||
+            !Number.isFinite(decision.input.latitude)
+          ) {
+            decision.input.latitude = coords.latitude;
+          }
+          if (
+            typeof decision.input.longitude !== "number" ||
+            !Number.isFinite(decision.input.longitude)
+          ) {
+            decision.input.longitude = coords.longitude;
+          }
+        } else {
+          throw new LLMDecisionError(
+            "latitude and longitude are required numbers in input for nearby_business_search",
+            "MISSING_COORDINATES",
+            400
+          );
+        }
+      }
+
+      if (
+        typeof decision.input.radius !== "number" ||
+        !Number.isFinite(decision.input.radius) ||
+        decision.input.radius <= 0
+      ) {
+        decision.input.radius = 3000;
+      }
+      if (
+        typeof decision.input.limit !== "number" ||
+        !Number.isInteger(decision.input.limit) ||
+        decision.input.limit <= 0
+      ) {
+        decision.input.limit = 5;
       }
     }
 
@@ -1183,11 +1259,57 @@ const getMockDecision = ({
 
   // Nearby business search
   if (nextPlannedStep.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH) {
+    const existingParams =
+      nextPlannedStep.params && typeof nextPlannedStep.params === "object"
+        ? nextPlannedStep.params
+        : {};
+    const coords = resolveCoordinates(run?.location);
+    const isGeneric = (val) =>
+      typeof val === "string" &&
+      (val.trim().toLowerCase() === "local business" ||
+        val.trim().toLowerCase() === "business");
+    const hasSpecificType =
+      typeof existingParams.businessType === "string" &&
+      existingParams.businessType.trim() &&
+      !isGeneric(existingParams.businessType);
+
+    const businessType = hasSpecificType
+      ? existingParams.businessType.trim()
+      : extractBusinessType(run?.goal || "");
+
+    const latitude =
+      typeof existingParams.latitude === "number" &&
+      Number.isFinite(existingParams.latitude)
+        ? existingParams.latitude
+        : coords.latitude;
+
+    const longitude =
+      typeof existingParams.longitude === "number" &&
+      Number.isFinite(existingParams.longitude)
+        ? existingParams.longitude
+        : coords.longitude;
+
+    const input = {
+      businessType,
+      latitude,
+      longitude,
+      radius:
+        typeof existingParams.radius === "number" &&
+        Number.isFinite(existingParams.radius)
+          ? existingParams.radius
+          : 3000,
+      limit:
+        typeof existingParams.limit === "number" &&
+        Number.isInteger(existingParams.limit)
+          ? existingParams.limit
+          : 5,
+    };
+
     return validateDecisionSchema(
       {
         action: "EXECUTE_TOOL",
         toolId: nextPlannedStep.toolId,
-        input: nextPlannedStep.params || {},
+        input,
         reasoning: nextPlannedStep.description || "Discover local competitors",
         stepIndex: nextPlannedStep.stepIndex,
         source: "mock",

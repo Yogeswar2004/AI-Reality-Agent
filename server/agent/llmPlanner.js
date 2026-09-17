@@ -18,7 +18,7 @@ import { classifyProviderError } from "./providerErrors.js";
 import { resolveModel, getFallbackModel } from "./modelResolver.js";
 import { formatMemoriesForPrompt } from "./agentMemory.js";
 import { formatConversationHistoryForPrompt } from "./agentConversationMessage.js";
-import { extractBusinessType } from "./planner.js";
+import { extractBusinessType, resolveCoordinates } from "./planner.js";
 
 const ensureDefaultTools = () => {
   const defaultTools = [
@@ -420,6 +420,41 @@ const validatePlanSchema = (plan, options = {}) => {
     }
     const params = rawParams ? { ...rawParams } : {};
 
+    // Ensure nearby_business_search has valid required parameters
+    if (cleanToolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH) {
+      const isGeneric = (val) =>
+        typeof val === "string" &&
+        (val.trim().toLowerCase() === "local business" ||
+          val.trim().toLowerCase() === "business");
+
+      const hasSpecificType =
+        typeof params.businessType === "string" &&
+        params.businessType.trim() &&
+        !isGeneric(params.businessType);
+
+      if (!hasSpecificType) {
+        params.businessType = extractBusinessType(
+          options.goal || plan.goalUnderstanding || plan.summary || ""
+        );
+      } else {
+        params.businessType = params.businessType.trim();
+      }
+
+      const coords = resolveCoordinates(options.location);
+      if (typeof params.latitude !== "number" || !Number.isFinite(params.latitude)) {
+        params.latitude = coords.latitude;
+      }
+      if (typeof params.longitude !== "number" || !Number.isFinite(params.longitude)) {
+        params.longitude = coords.longitude;
+      }
+      if (typeof params.radius !== "number" || !Number.isFinite(params.radius) || params.radius <= 0) {
+        params.radius = 3000;
+      }
+      if (typeof params.limit !== "number" || !Number.isInteger(params.limit) || params.limit <= 0) {
+        params.limit = 5;
+      }
+    }
+
     // Dependencies check
     let dependsOnStep = null;
     if (step.dependsOnStep !== undefined && step.dependsOnStep !== null) {
@@ -521,6 +556,7 @@ const getMockPlan = ({ goal, location = null, budget = null, availableTools = nu
   const toolIds = new Set(tools.map((t) => t.id));
 
   // Determine local vs tech based on location or keywords
+  const lower = cleanGoal.toLowerCase();
   const extractedType = extractBusinessType(cleanGoal);
   const isLocal =
     Boolean(cleanLocation) ||
@@ -876,6 +912,8 @@ Create a structured research plan to rigorously evaluate this venture's market v
   return validatePlanSchema(rawPlan, {
     maxSteps,
     availableTools: tools,
+    goal: cleanGoal,
+    location: cleanLocation || location,
   });
 };
 
@@ -1116,6 +1154,8 @@ Propose a replacement plan to pivot the investigation. You have AT MOST ${remain
     return validatePlanSchema(rawPlan, {
       maxSteps: remainingSteps,
       availableTools: tools,
+      goal: run?.goal,
+      location: run?.location,
     });
   } catch (llmErr) {
     console.warn(

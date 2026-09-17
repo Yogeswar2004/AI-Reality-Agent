@@ -441,11 +441,57 @@ const evaluateDeterministicNextStep = ({ run, steps, evidenceList }) => {
   }
 
   if (nextPlannedStep.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH) {
+    const existingParams =
+      nextPlannedStep.params && typeof nextPlannedStep.params === "object"
+        ? nextPlannedStep.params
+        : {};
+    const coords = resolveCoordinates(run.location);
+    const isGeneric = (val) =>
+      typeof val === "string" &&
+      (val.trim().toLowerCase() === "local business" ||
+        val.trim().toLowerCase() === "business");
+    const hasSpecificType =
+      typeof existingParams.businessType === "string" &&
+      existingParams.businessType.trim() &&
+      !isGeneric(existingParams.businessType);
+
+    const businessType = hasSpecificType
+      ? existingParams.businessType.trim()
+      : extractBusinessType(run.goal);
+
+    const latitude =
+      typeof existingParams.latitude === "number" &&
+      Number.isFinite(existingParams.latitude)
+        ? existingParams.latitude
+        : coords.latitude;
+
+    const longitude =
+      typeof existingParams.longitude === "number" &&
+      Number.isFinite(existingParams.longitude)
+        ? existingParams.longitude
+        : coords.longitude;
+
+    const input = {
+      businessType,
+      latitude,
+      longitude,
+      radius:
+        typeof existingParams.radius === "number" &&
+        Number.isFinite(existingParams.radius)
+          ? existingParams.radius
+          : 3000,
+      limit:
+        typeof existingParams.limit === "number" &&
+        Number.isInteger(existingParams.limit)
+          ? existingParams.limit
+          : 5,
+    };
+
     return {
       action: "EXECUTE_TOOL",
       toolId: nextPlannedStep.toolId,
-      input: nextPlannedStep.params,
-      reasoning: nextPlannedStep.description,
+      input,
+      reasoning: nextPlannedStep.description || "Discover competitors and analyze local density",
       stepIndex: nextPlannedStep.stepIndex,
     };
   }
