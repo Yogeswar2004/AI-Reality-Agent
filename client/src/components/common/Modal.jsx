@@ -40,6 +40,9 @@ function Modal({
         style={{
           width: "100%",
           maxWidth,
+          maxHeight: "min(90vh, 850px)",
+          display: "flex",
+          flexDirection: "column",
           background: "var(--bg-surface)",
           border: "1px solid var(--border-default)",
           borderRadius: "var(--radius-lg)",
@@ -57,6 +60,7 @@ function Modal({
             justifyContent: "space-between",
             padding: "20px 24px",
             borderBottom: "1px solid var(--border-subtle)",
+            flexShrink: 0,
           }}
         >
           <div>
@@ -89,7 +93,7 @@ function Modal({
         </div>
 
         {/* Content */}
-        <div style={{ padding: "24px" }}>{children}</div>
+        <div style={{ padding: "24px", overflowY: "auto", flex: 1 }}>{children}</div>
       </div>
     </div>
   );

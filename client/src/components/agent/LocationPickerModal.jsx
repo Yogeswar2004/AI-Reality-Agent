@@ -505,7 +505,7 @@ export default function LocationPickerModal({
       description="Position the target venture market under the crosshair. The agent will inspect local competitors and market sentiment within a 3 km catchment radius."
       maxWidth="780px"
     >
-      <div style={{ display: "flex", flexDirection: "column", gap: "16px", padding: "0 24px 20px" }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
         {/* Preset Metro Chips */}
         <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
           <div style={{ fontSize: "11px", fontWeight: "600", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.5px" }}>
@@ -551,7 +551,7 @@ export default function LocationPickerModal({
         {/* Map Container or Manual Fallback */}
         <div
           style={{
-            height: "380px",
+            height: "clamp(250px, 40vh, 380px)",
             width: "100%",
             borderRadius: "var(--radius-md)",
             overflow: "hidden",
