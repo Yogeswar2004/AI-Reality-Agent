@@ -1,9 +1,10 @@
 import BaseToolAdapter from "../toolAdapter.js";
 import { TOOL_IDS, TOOL_ACCESS, TOOL_RISK, DEFAULT_QUOTA_COST, MOCK_ENABLED } from "../toolConstants.js";
 import { TOOL_FIXTURES } from "../toolFixtures.js";
+import { analyzeTechIdea } from "../../utils/techIdeaAnalyzer.js";
 
 /**
- * Adapter for the tech_idea_analysis tool (Phase 3 mock-only).
+ * Adapter for the tech_idea_analysis tool.
  */
 class TechIdeaAnalysisAdapter extends BaseToolAdapter {
   /**
@@ -15,7 +16,12 @@ class TechIdeaAnalysisAdapter extends BaseToolAdapter {
     if (definition.id !== TOOL_IDS.TECH_IDEA_ANALYSIS) {
       throw new Error("Incorrect tool ID for TechIdeaAnalysisAdapter");
     }
-  };
+    this.providerClient = null;
+  }
+
+  setProviderClient(client) {
+    this.providerClient = client;
+  }
 
   /**
    * Validate input for tech_idea_analysis.
@@ -57,11 +63,12 @@ class TechIdeaAnalysisAdapter extends BaseToolAdapter {
 
   /**
    * Execute the tool logic.
-   * In Phase 3, we return the deterministic fixture.
+   * In Mock mode, returns deterministic fixture.
+   * In Live mode, calls Gemini analyzeTechIdea.
    * @param {Object} input - The validated input.
-   * @returns {Object} The fixture output.
+   * @returns {Promise<Object>} The fixture or Gemini analysis output.
    */
-  _execute(input) {
+  async _execute(input) {
     if (process.env.MOCK_MODE === "true") {
       if (input.goal === "MOCK_QUOTA_ERROR") {
         const err = new Error("Gemini API quota exceeded. Please try again later or upgrade quota.");
@@ -112,15 +119,31 @@ class TechIdeaAnalysisAdapter extends BaseToolAdapter {
         err.provider = "gemini";
         throw err;
       }
+
+      const fixture = TOOL_FIXTURES.tech_idea_analysis;
+      return {
+        feasibility: fixture.feasibility,
+        suggestedStack: [...fixture.suggestedStack],
+        marketFitScore: fixture.marketFitScore,
+        risks: [...fixture.risks],
+      };
     }
 
-    const fixture = TOOL_FIXTURES.tech_idea_analysis;
-    return {
-      feasibility: fixture.feasibility,
-      suggestedStack: [...fixture.suggestedStack],
-      marketFitScore: fixture.marketFitScore,
-      risks: [...fixture.risks],
+    const result = await analyzeTechIdea({
+      goal: input.goal.trim(),
+      location: input.location ? input.location.trim() : null,
+      geminiClient: this.providerClient,
+    });
+
+    const output = {
+      feasibility: result.feasibility,
+      suggestedStack: Array.isArray(result.suggestedStack) ? result.suggestedStack : [],
+      marketFitScore: typeof result.marketFitScore === "number" ? result.marketFitScore : 5.0,
+      risks: Array.isArray(result.risks) ? result.risks : [],
     };
+
+    this.validateOutput(output);
+    return output;
   }
 
   /**
@@ -207,7 +230,7 @@ const definition = {
     additionalProperties: false,
   },
   access: TOOL_ACCESS.READ_ONLY,
-  external: false, // mock-only in Phase 3
+  external: true, // Calls external Gemini model in live mode
   provider: "gemini",
   quotaCost: DEFAULT_QUOTA_COST,
   riskLevel: TOOL_RISK.LOW,

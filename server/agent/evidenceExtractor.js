@@ -40,7 +40,7 @@ export const extractEvidenceFromStep = (step, runContext = {}) => {
   switch (toolId) {
     case TOOL_IDS.TECH_IDEA_ANALYSIS: {
       evidenceType = "tech_assessment";
-      provider = "internal_fixture";
+      provider = isMock ? "internal_fixture" : "gemini";
       confidence = null; // Do not fabricate confidence
       data = {
         feasibility: step.output.feasibility,

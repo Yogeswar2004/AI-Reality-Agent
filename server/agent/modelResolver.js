@@ -10,6 +10,7 @@ export const TASK_ENV_VARS = Object.freeze({
   planner: "GEMINI_PLANNER_MODEL",
   decision: "GEMINI_DECISION_MODEL",
   sentiment: "GEMINI_SENTIMENT_MODEL",
+  tech_analysis: "GEMINI_TECH_ANALYSIS_MODEL",
 });
 
 /**
@@ -19,6 +20,7 @@ export const TASK_CAPABILITY_REQUIREMENTS = Object.freeze({
   planner: Object.freeze(["structured_json", "system_instruction", "high_reasoning"]),
   decision: Object.freeze(["structured_json", "system_instruction", "grounded_reasoning"]),
   sentiment: Object.freeze(["structured_json", "batch_text_extraction"]),
+  tech_analysis: Object.freeze(["structured_json", "high_reasoning"]),
 });
 
 /**
@@ -60,6 +62,7 @@ export const COMPATIBLE_MODELS = Object.freeze({
   planner: Object.freeze(["gemini-3.6-flash", "gemini-3.7-flash", "gemini-2.5-flash"]),
   decision: Object.freeze(["gemini-3.6-flash", "gemini-3.7-flash", "gemini-2.5-flash"]),
   sentiment: Object.freeze(["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.7-flash", "gemini-2.5-flash"]),
+  tech_analysis: Object.freeze(["gemini-3.6-flash", "gemini-3.7-flash", "gemini-2.5-flash"]),
 });
 
 export const MAX_FALLBACK_HOPS = 1;
