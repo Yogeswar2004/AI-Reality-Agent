@@ -119,39 +119,54 @@ raw: {
 
 
 
-  const response = await axios.get(
-  RAPIDAPI_URL,
-  {
-  params: {
-  query: businessType,
-  lat: String(latitude),
-  lng: String(longitude),
-  limit: String(limit),
-  language: "en",
-  extract_emails_and_contacts: "false",
-  },
+    const makeRequest = () =>
+      axios.get(
+        RAPIDAPI_URL,
+        {
+          params: {
+            query: businessType,
+            lat: String(latitude),
+            lng: String(longitude),
+            limit: String(limit),
+            language: "en",
+            extract_emails_and_contacts: "false",
+          },
+          headers: {
+            "x-rapidapi-key": process.env.RAPIDAPI_KEY,
+            "x-rapidapi-host": RAPIDAPI_HOST,
+            "Content-Type": "application/json",
+          },
+          timeout: 30000,
+        }
+      );
 
-  
-   headers: {
-     "x-rapidapi-key":
-       process.env.RAPIDAPI_KEY,
+    let response;
+    try {
+      response = await makeRequest();
+    } catch (firstErr) {
+      const firstStatus = firstErr.response?.status || firstErr.status;
+      const firstMsg =
+        firstErr.response?.data?.message || firstErr.message || "";
+      const isQuota =
+        /monthly\s*quota|daily\s*quota|requests\s*per\s*month|quota\s*exceeded/i.test(firstMsg) &&
+        !/per\s*second/i.test(firstMsg);
+      const isRps =
+        !isQuota &&
+        (firstStatus === 429 ||
+          /rate\s*limit|requests?\s*per\s*second|too\s*many\s*requests/i.test(firstMsg));
 
-     "x-rapidapi-host":
-       RAPIDAPI_HOST,
+      if (isRps) {
+        console.warn(
+          "[RapidApiBusinessSearch] Transient 429 RPS rate limit detected. Waiting 1.3s for single automatic provider retry..."
+        );
+        await new Promise((resolve) => setTimeout(resolve, 1300));
+        response = await makeRequest();
+      } else {
+        throw firstErr;
+      }
+    }
 
-     "Content-Type":
-       "application/json",
-   },
-
-   timeout: 30000,
-  
-
-  }
-  );
-
- 
-
-  const data = response.data;
+    const data = response.data;
 
   /*
 
@@ -303,35 +318,90 @@ if (error.response) {
   );
 }
 
-const status = error.response?.status || error.status;
-const message = error.response?.data?.message || error.message || "Failed to search nearby businesses";
+    const status = error.response?.status || error.status;
+    const rawMessage = error.response?.data?.message || error.message || "";
+    const lower = rawMessage.toLowerCase();
 
-if (status === 429) {
-  const isQuota =
-    message.toLowerCase().includes("quota") ||
-    message.toLowerCase().includes("monthly") ||
-    message.toLowerCase().includes("daily") ||
-    message.toLowerCase().includes("plan");
+    // 1. True Monthly Quota vs Transient RPS
+    const isQuota =
+      /monthly\s*quota|daily\s*quota|requests\s*per\s*month|quota\s*exceeded/i.test(rawMessage) &&
+      !/per\s*second/i.test(rawMessage);
 
-  if (isQuota) {
-    const err = new Error(`SEARCH_QUOTA_EXCEEDED: ${message}`);
-    err.code = "SEARCH_QUOTA_EXCEEDED";
-    err.status = 429;
-    throw err;
-  } else {
-    const err = new Error(`RATE_LIMIT_EXCEEDED: ${message}`);
-    err.code = "RATE_LIMIT_EXCEEDED";
-    err.status = 429;
+    if (isQuota) {
+      const err = new Error("RapidAPI monthly quota exceeded. Please try again after quota reset or upgrade your plan.");
+      err.code = "SEARCH_QUOTA_EXCEEDED";
+      err.status = 429;
+      err.provider = "rapidapi";
+      throw err;
+    }
+
+    const isRps =
+      !isQuota &&
+      (status === 429 ||
+        /rate\s*limit|requests?\s*per\s*second|too\s*many\s*requests/i.test(rawMessage));
+
+    if (isRps) {
+      const err = new Error("RapidAPI rate limit: 1 request/second exceeded. Please wait a moment and retry.");
+      err.code = "RATE_LIMIT_EXCEEDED";
+      err.status = 429;
+      err.provider = "rapidapi";
+      throw err;
+    }
+
+    // 2. 504 Gateway Timeout or Network Timeout
+    const isTimeout =
+      status === 504 ||
+      status === 408 ||
+      error.code === "ECONNABORTED" ||
+      error.code === "ETIMEDOUT" ||
+      lower.includes("timeout") ||
+      lower.includes("timed out");
+
+    if (isTimeout) {
+      const err = new Error("RapidAPI Gateway Timeout (504): upstream places service timed out. Please retry.");
+      err.code = "TIMEOUT";
+      err.status = status || 504;
+      err.provider = "rapidapi";
+      throw err;
+    }
+
+    // 3. 502 Bad Gateway
+    if (status === 502) {
+      const err = new Error("RapidAPI Bad Gateway (502): upstream places service was unavailable. Please retry.");
+      err.code = "BAD_GATEWAY";
+      err.status = 502;
+      err.provider = "rapidapi";
+      throw err;
+    }
+
+    // 4. 500 Server Error
+    if (status === 500) {
+      const err = new Error("RapidAPI Server Error (500): upstream places service encountered an error. Please retry.");
+      err.code = "SERVER_ERROR";
+      err.status = 500;
+      err.provider = "rapidapi";
+      throw err;
+    }
+
+    // 5. 401 / 403 Authentication Error
+    if (status === 401 || status === 403) {
+      const err = new Error("RapidAPI Authentication Error: Invalid or unauthorized API key.");
+      err.code = "AUTH_ERROR";
+      err.status = status;
+      err.provider = "rapidapi";
+      throw err;
+    }
+
+    // 6. Generic Provider Fallback
+    const fallbackMessage = rawMessage
+      ? `RapidAPI error (${status || "unknown"}): ${rawMessage}`
+      : "Nearby business search failed due to an unknown provider error.";
+    const err = new Error(fallbackMessage);
+    err.code = "PROVIDER_ERROR";
+    err.status = status || 500;
+    err.provider = "rapidapi";
     throw err;
   }
-}
-
-throw new Error(
-  `Failed to search nearby businesses using RapidAPI: ${message}`
-);
-
-
-}
 };
 
 export default rapidApiBusinessSearch;

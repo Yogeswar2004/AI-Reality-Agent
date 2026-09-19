@@ -3,6 +3,8 @@ import { authenticateToken } from "../middleware/authMiddleware.js";
 import {
   approveRunPlan,
   cancelAgentRun,
+  resumeRunHandler,
+  retryStepHandler,
   createAgentRun,
   executeTool,
   generateRunPlan,
@@ -35,6 +37,8 @@ router.get("/runs/:id", authenticateToken, getAgentRun);
 router.get("/runs/:id/status", authenticateToken, getAgentRunStatus);
 router.patch("/runs/:id/state", authenticateToken, updateAgentRunState);
 router.post("/runs/:id/cancel", authenticateToken, cancelAgentRun);
+router.post("/runs/:id/resume", authenticateToken, resumeRunHandler);
+router.post("/runs/:id/retry-step", authenticateToken, retryStepHandler);
 router.post("/runs/:id/execute-tool", authenticateToken, executeTool);
 router.get("/runs/:id/evidence", authenticateToken, getRunEvidence);
 

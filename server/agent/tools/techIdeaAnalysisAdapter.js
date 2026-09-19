@@ -62,8 +62,58 @@ class TechIdeaAnalysisAdapter extends BaseToolAdapter {
    * @returns {Object} The fixture output.
    */
   _execute(input) {
-    // We ignore the input for the fixture in Phase 3 (deterministic default).
-    // In a real implementation, we might use the input to vary the output.
+    if (process.env.MOCK_MODE === "true") {
+      if (input.goal === "MOCK_QUOTA_ERROR") {
+        const err = new Error("Gemini API quota exceeded. Please try again later or upgrade quota.");
+        err.status = 429;
+        err.code = "RESOURCE_EXHAUSTED";
+        err.provider = "gemini";
+        throw err;
+      }
+      if (input.goal === "MOCK_RATE_LIMIT_ERROR") {
+        const err = new Error("Gemini rate limit: 1 request/second exceeded. Please wait a moment and retry.");
+        err.status = 429;
+        err.code = "RATE_LIMIT_EXCEEDED";
+        err.provider = "gemini";
+        throw err;
+      }
+      if (input.goal === "MOCK_AUTH_ERROR") {
+        const err = new Error("Gemini Authentication Error: Invalid or expired API key.");
+        err.status = 403;
+        err.code = "AUTH_ERROR";
+        err.provider = "gemini";
+        throw err;
+      }
+      if (input.goal === "MOCK_503_ERROR") {
+        const err = new Error("Gemini Service Unavailable (503): model is temporarily overloaded. Please retry.");
+        err.status = 503;
+        err.code = "SERVICE_UNAVAILABLE";
+        err.provider = "gemini";
+        throw err;
+      }
+      if (input.goal === "MOCK_502_ERROR") {
+        const err = new Error("Gemini Bad Gateway (502): upstream service was unavailable. Please retry.");
+        err.status = 502;
+        err.code = "BAD_GATEWAY";
+        err.provider = "gemini";
+        throw err;
+      }
+      if (input.goal === "MOCK_500_ERROR") {
+        const err = new Error("Gemini Server Error (500): model service encountered an internal error. Please retry.");
+        err.status = 500;
+        err.code = "SERVER_ERROR";
+        err.provider = "gemini";
+        throw err;
+      }
+      if (input.goal === "MOCK_TIMEOUT_ERROR") {
+        const err = new Error("Gemini Gateway Timeout (504): tech idea analysis request timed out. Please retry.");
+        err.status = 504;
+        err.code = "TIMEOUT";
+        err.provider = "gemini";
+        throw err;
+      }
+    }
+
     const fixture = TOOL_FIXTURES.tech_idea_analysis;
     return {
       feasibility: fixture.feasibility,
@@ -158,6 +208,7 @@ const definition = {
   },
   access: TOOL_ACCESS.READ_ONLY,
   external: false, // mock-only in Phase 3
+  provider: "gemini",
   quotaCost: DEFAULT_QUOTA_COST,
   riskLevel: TOOL_RISK.LOW,
   mockEnabled: MOCK_ENABLED,

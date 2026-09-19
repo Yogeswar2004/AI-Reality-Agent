@@ -3,7 +3,7 @@ import { CheckCircle2, AlertCircle, Clock, ChevronDown, ChevronUp, Terminal } fr
 import CacheBadge from "./CacheBadge";
 import EmptyState from "../common/EmptyState";
 
-function AuditStepList({ steps = [], loading = false }) {
+function AuditStepList({ steps = [], loading = false, onRetryStep }) {
   const [expandedStepId, setExpandedStepId] = useState(null);
 
   if (loading) {
@@ -118,7 +118,7 @@ function AuditStepList({ steps = [], loading = false }) {
                   </div>
 
                   <div style={{ minWidth: 0 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
                       <span style={{ fontSize: "11px", fontWeight: "700", color: "var(--text-muted)" }}>
                         #{step.stepNumber}
                       </span>
@@ -133,6 +133,20 @@ function AuditStepList({ steps = [], loading = false }) {
                       >
                         {toolName}
                       </strong>
+                      {step.attempt && step.attempt > 1 && (
+                        <span
+                          style={{
+                            fontSize: "10px",
+                            padding: "1px 6px",
+                            borderRadius: "var(--radius-xs)",
+                            background: "rgba(245, 158, 11, 0.15)",
+                            color: "var(--status-warning)",
+                            fontWeight: "700",
+                          }}
+                        >
+                          Attempt {step.attempt} (Retry)
+                        </span>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -167,8 +181,46 @@ function AuditStepList({ steps = [], loading = false }) {
                   }}
                 >
                   {step.error && (
-                    <div style={{ color: "var(--status-danger)", padding: "6px 10px", background: "rgba(239, 68, 68, 0.1)", borderRadius: "var(--radius-xs)" }}>
-                      <strong>Error:</strong> {step.error.message || JSON.stringify(step.error)}
+                    <div
+                      style={{
+                        color: "var(--status-danger)",
+                        padding: "8px 12px",
+                        background: "rgba(239, 68, 68, 0.1)",
+                        borderRadius: "var(--radius-xs)",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: "10px",
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      <div style={{ flex: 1, minWidth: "200px" }}>
+                        <strong>Error:</strong> {step.error.message || JSON.stringify(step.error)}
+                      </div>
+                      {isFailed && onRetryStep && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onRetryStep();
+                          }}
+                          style={{
+                            padding: "4px 10px",
+                            background: "var(--status-danger)",
+                            color: "#ffffff",
+                            border: "none",
+                            borderRadius: "var(--radius-xs)",
+                            fontSize: "11px",
+                            fontWeight: "600",
+                            cursor: "pointer",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "4px",
+                          }}
+                        >
+                          Retry Step
+                        </button>
+                      )}
                     </div>
                   )}
 

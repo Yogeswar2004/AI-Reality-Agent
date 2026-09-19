@@ -424,12 +424,79 @@ return {
     error
   );
 
-  const err = new Error(
-    `Failed to analyze business reviews: ${error.message || error}`
-  );
-  err.status = error.status || error.response?.status;
-  err.code = error.code || error.response?.data?.error?.code;
-  err.originalError = error;
+  const classified = classifyProviderError(error);
+
+  if (classified.isQuota) {
+    const err = new Error("Gemini API quota exceeded. Please try again later or upgrade quota.");
+    err.code = "RESOURCE_EXHAUSTED";
+    err.status = 429;
+    err.provider = "gemini";
+    throw err;
+  }
+
+  if (classified.isRateLimited) {
+    const err = new Error("Gemini rate limit: 1 request/second exceeded. Please wait a moment and retry.");
+    err.code = "RATE_LIMIT_EXCEEDED";
+    err.status = 429;
+    err.provider = "gemini";
+    throw err;
+  }
+
+  if (classified.isModelUnavailable) {
+    const err = new Error(classified.sanitizedMessage || "Gemini model is currently unavailable or deprecated.");
+    err.code = "MODEL_UNAVAILABLE";
+    err.status = classified.status || 404;
+    err.provider = "gemini";
+    throw err;
+  }
+
+  if (classified.isTimeout) {
+    const err = new Error("Gemini Gateway Timeout (504): review sentiment analysis request timed out. Please retry.");
+    err.code = "TIMEOUT";
+    err.status = classified.status || 504;
+    err.provider = "gemini";
+    throw err;
+  }
+
+  if (classified.status === 502) {
+    const err = new Error("Gemini Bad Gateway (502): upstream service was unavailable. Please retry.");
+    err.code = "BAD_GATEWAY";
+    err.status = 502;
+    err.provider = "gemini";
+    throw err;
+  }
+
+  if (classified.status === 503) {
+    const err = new Error("Gemini Service Unavailable (503): model is temporarily overloaded. Please retry.");
+    err.code = "SERVICE_UNAVAILABLE";
+    err.status = 503;
+    err.provider = "gemini";
+    throw err;
+  }
+
+  if (classified.status === 401 || classified.status === 403 || /api_key|invalid_api_key/i.test(classified.rawMessage)) {
+    const err = new Error("Gemini Authentication Error: Invalid or expired API key.");
+    err.code = "AUTH_ERROR";
+    err.status = classified.status || 403;
+    err.provider = "gemini";
+    throw err;
+  }
+
+  if (classified.isServerError) {
+    const err = new Error("Gemini Server Error (500): model service encountered an internal error. Please retry.");
+    err.code = "SERVER_ERROR";
+    err.status = classified.status || 500;
+    err.provider = "gemini";
+    throw err;
+  }
+
+  const fallbackMsg = classified.sanitizedMessage
+    ? `Gemini error (${classified.status || "unknown"}): ${classified.sanitizedMessage}`
+    : "Review sentiment analysis failed due to an unknown provider error.";
+  const err = new Error(fallbackMsg);
+  err.code = "PROVIDER_ERROR";
+  err.status = classified.status || 500;
+  err.provider = "gemini";
   throw err;
 }
 };

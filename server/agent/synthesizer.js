@@ -63,10 +63,31 @@ const synthesizeFinalRecommendation = ({ run, steps = [], evidence = [] }) => {
     ? [...new Set([...evidenceToolIds, ...stepToolIds])]
     : stepToolIds;
 
-  const failedTools = failedToolSteps.map((s) => ({
-    toolId: s.input?.toolId || "unknown",
-    error: s.error || "Tool execution failed",
-  }));
+  // Only consider a tool failed if it remains UNRESOLVED (i.e. has no completed attempt or evidence)
+  const unresolvedFailedSteps = failedToolSteps.filter(
+    (s) => s.input?.toolId && !successfulTools.includes(s.input.toolId)
+  );
+
+  // Take the latest failed attempt for each unresolved tool
+  const unresolvedFailedByTool = new Map();
+  for (const s of unresolvedFailedSteps) {
+    const toolId = s.input?.toolId || "unknown";
+    unresolvedFailedByTool.set(toolId, s);
+  }
+
+  const failedTools = Array.from(unresolvedFailedByTool.values()).map((s) => {
+    const rawError = s.error;
+    let errorMessage = "Tool execution failed";
+    if (typeof rawError === "string" && rawError.trim()) {
+      errorMessage = rawError.trim();
+    } else if (rawError && typeof rawError === "object") {
+      errorMessage = rawError.message || rawError.code || "Tool execution failed";
+    }
+    return {
+      toolId: s.input?.toolId || "unknown",
+      error: errorMessage,
+    };
+  });
 
   // 2. Locate evidence objects across all execution steps
   const techEvidence = safeEvidence.find(

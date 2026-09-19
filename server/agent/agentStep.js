@@ -29,9 +29,19 @@ const serializeAgentStep = (step) => ({
   ...step,
   _id: step._id.toString(),
   runId: step.runId.toString(),
+  retryOfStepId: step.retryOfStepId ? step.retryOfStepId.toString() : null,
 });
 
-const createAgentStep = async ({ runId, stepNumber, type, input, metadata = null }) => {
+const createAgentStep = async ({
+  runId,
+  stepNumber,
+  type,
+  input,
+  metadata = null,
+  attempt = 1,
+  retryOfStepId = null,
+  logicalStepIndex = null,
+}) => {
   // Validate runId
   if (!ObjectId.isValid(runId)) {
     throw new AgentStepError("Invalid run ID", "INVALID_RUN_ID");
@@ -57,6 +67,18 @@ const createAgentStep = async ({ runId, stepNumber, type, input, metadata = null
   const step = {
     runId: new ObjectId(runId),
     stepNumber,
+    logicalStepIndex:
+      typeof logicalStepIndex === "number" && Number.isInteger(logicalStepIndex) && logicalStepIndex > 0
+        ? logicalStepIndex
+        : stepNumber,
+    attempt:
+      typeof attempt === "number" && Number.isInteger(attempt) && attempt > 0
+        ? attempt
+        : 1,
+    retryOfStepId:
+      retryOfStepId && ObjectId.isValid(retryOfStepId)
+        ? new ObjectId(String(retryOfStepId))
+        : null,
     type,
     status: "pending", // default status
     input,

@@ -135,15 +135,52 @@ class ReviewSentimentAdapter extends BaseToolAdapter {
     let output;
     if (process.env.MOCK_MODE === "true") {
       if (input.businessType === "MOCK_QUOTA_ERROR" || input.businessName === "MOCK_QUOTA_ERROR") {
-        const err = new Error("Failed to analyze business reviews: Resource has been exhausted (e.g. check quota).");
+        const err = new Error("Gemini API quota exceeded. Please try again later or upgrade quota.");
         err.status = 429;
         err.code = "RESOURCE_EXHAUSTED";
+        err.provider = "gemini";
         throw err;
       }
       if (input.businessType === "MOCK_RATE_LIMIT_ERROR" || input.businessName === "MOCK_RATE_LIMIT_ERROR") {
-        const err = new Error("Failed to analyze business reviews: Too Many Requests: Rate limit reached, try again in 1s");
+        const err = new Error("Gemini rate limit: 1 request/second exceeded. Please wait a moment and retry.");
         err.status = 429;
         err.code = "RATE_LIMIT_EXCEEDED";
+        err.provider = "gemini";
+        throw err;
+      }
+      if (input.businessType === "MOCK_AUTH_ERROR" || input.businessName === "MOCK_AUTH_ERROR") {
+        const err = new Error("Gemini Authentication Error: Invalid or expired API key.");
+        err.status = 403;
+        err.code = "AUTH_ERROR";
+        err.provider = "gemini";
+        throw err;
+      }
+      if (input.businessType === "MOCK_503_ERROR" || input.businessName === "MOCK_503_ERROR") {
+        const err = new Error("Gemini Service Unavailable (503): model is temporarily overloaded. Please retry.");
+        err.status = 503;
+        err.code = "SERVICE_UNAVAILABLE";
+        err.provider = "gemini";
+        throw err;
+      }
+      if (input.businessType === "MOCK_502_ERROR" || input.businessName === "MOCK_502_ERROR") {
+        const err = new Error("Gemini Bad Gateway (502): upstream service was unavailable. Please retry.");
+        err.status = 502;
+        err.code = "BAD_GATEWAY";
+        err.provider = "gemini";
+        throw err;
+      }
+      if (input.businessType === "MOCK_500_ERROR" || input.businessName === "MOCK_500_ERROR") {
+        const err = new Error("Gemini Server Error (500): model service encountered an internal error. Please retry.");
+        err.status = 500;
+        err.code = "SERVER_ERROR";
+        err.provider = "gemini";
+        throw err;
+      }
+      if (input.businessType === "MOCK_TIMEOUT_ERROR" || input.businessName === "MOCK_TIMEOUT_ERROR") {
+        const err = new Error("Gemini Gateway Timeout (504): review sentiment analysis request timed out. Please retry.");
+        err.status = 504;
+        err.code = "TIMEOUT";
+        err.provider = "gemini";
         throw err;
       }
 
@@ -299,6 +336,7 @@ const definition = {
   },
   access: TOOL_ACCESS.READ_ONLY,
   external: true,
+  provider: "gemini",
   quotaCost: DEFAULT_QUOTA_COST,
   riskLevel: TOOL_RISK.LOW,
   mockEnabled: MOCK_ENABLED,

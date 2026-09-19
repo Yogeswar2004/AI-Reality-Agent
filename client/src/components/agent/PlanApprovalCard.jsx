@@ -167,27 +167,36 @@ function PlanApprovalCard({
 
       {/* Action Buttons */}
       <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px", marginTop: "4px" }}>
-        {onCancel && (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onCancel}
-            disabled={loading}
-            icon={<X size={14} />}
-          >
-            Decline
-          </Button>
-        )}
+        {run?.state === "awaiting_approval" ? (
+          <>
+            {onCancel && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={onCancel}
+                disabled={loading}
+                icon={<X size={14} />}
+              >
+                Decline
+              </Button>
+            )}
 
-        <Button
-          variant="primary"
-          size="md"
-          onClick={onApprove}
-          loading={loading}
-          icon={<Check size={16} />}
-        >
-          Approve & Authorize Investigation
-        </Button>
+            <Button
+              variant="primary"
+              size="md"
+              onClick={onApprove}
+              loading={loading}
+              icon={<Check size={16} />}
+            >
+              Approve & Authorize Investigation
+            </Button>
+          </>
+        ) : (
+          <Badge variant="viable" size="sm">
+            <Check size={12} style={{ marginRight: "4px" }} />
+            Plan Authorized
+          </Badge>
+        )}
       </div>
     </div>
   );

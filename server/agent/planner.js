@@ -301,20 +301,158 @@ const evaluateDeterministicNextStep = ({ run, steps, evidenceList }) => {
   const failedSteps = toolSteps.filter((s) => s.status === "failed");
   const completedSteps = toolSteps.filter((s) => s.status === "completed");
 
-  if (failedSteps.length > 0) {
-    return {
-      action: "FAIL",
-      reason: "Previous tool step failed",
-      failedStep: failedSteps[failedSteps.length - 1],
-    };
-  }
-
-  const executedToolIds = new Set([
+  const completedToolIds = new Set([
     ...completedSteps.map((s) => s.input?.toolId),
     ...evidenceList.map((e) => e.toolId),
   ]);
+
+  // Check if there is an unresolved failed tool step (latest attempt for tool failed and hasn't completed)
+  const latestFailedStep = [...failedSteps].reverse().find(
+    (fs) => fs.input?.toolId && !completedToolIds.has(fs.input.toolId)
+  );
+
+  if (latestFailedStep) {
+    const toolId = latestFailedStep.input?.toolId;
+    const toolDef = registry.getTool(toolId);
+    const isExternalTool = toolDef
+      ? Boolean(toolDef.external)
+      : toolId !== TOOL_IDS.TECH_IDEA_ANALYSIS;
+    if (isExternalTool) {
+      const maxExternalCalls = run.budget?.maxExternalCalls || 5;
+      if ((run.externalCallCount || 0) >= maxExternalCalls) {
+        return {
+          action: "QUOTA_EXHAUSTED",
+          message: "External call budget limit reached for this run",
+        };
+      }
+    }
+
+    const nextAttempt = (latestFailedStep.attempt || 1) + 1;
+    const logicalStepIndex =
+      latestFailedStep.logicalStepIndex || latestFailedStep.stepNumber;
+    const rawErrorMsg =
+      latestFailedStep.error?.message || "Previous attempt failed";
+
+    // Reconstruct / reuse parameters for retry
+    let retryInput = latestFailedStep.input?.params
+      ? { ...latestFailedStep.input.params }
+      : (latestFailedStep.input ? { ...latestFailedStep.input } : {});
+    if (retryInput.toolId) delete retryInput.toolId;
+
+    // 1. For nearby_business_search, ensure businessType, coordinates, radius, limit
+    if (toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH) {
+      if (!retryInput.businessType || retryInput.businessType === "local business" || retryInput.businessType === "business") {
+        retryInput.businessType = extractBusinessType(run.goal);
+      }
+      if (typeof retryInput.latitude !== "number" || typeof retryInput.longitude !== "number") {
+        const coords = resolveCoordinates(run.location);
+        retryInput.latitude = coords.latitude;
+        retryInput.longitude = coords.longitude;
+      }
+      if (typeof retryInput.radius !== "number") retryInput.radius = 3000;
+      if (typeof retryInput.limit !== "number") retryInput.limit = 5;
+    }
+
+    // 2. For business_reviews_search, ensure businessId is populated from Step 1 evidence if needed
+    if (
+      toolId === TOOL_IDS.BUSINESS_REVIEWS_SEARCH &&
+      (!retryInput.businessId || !String(retryInput.businessId).trim())
+    ) {
+      const competitorEvidenceList = evidenceList.filter(
+        (e) =>
+          (e.evidenceType === "competitor_discovery" ||
+            e.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH) &&
+          e.status !== "contradicted" &&
+          e.status !== "stale"
+      );
+      const allDiscoveredBusinesses = [];
+      for (const e of competitorEvidenceList) {
+        if (Array.isArray(e.data?.businesses)) {
+          allDiscoveredBusinesses.push(...e.data.businesses);
+        }
+      }
+      for (const s of completedSteps.filter((cs) => cs.input?.toolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH)) {
+        if (Array.isArray(s.output?.businesses)) {
+          allDiscoveredBusinesses.push(...s.output.businesses);
+        }
+      }
+      if (allDiscoveredBusinesses.length > 0) {
+        const primary = allDiscoveredBusinesses[0];
+        if (primary?.placeId) {
+          retryInput.businessId = primary.placeId;
+          if (primary.name) retryInput.businessName = primary.name;
+        }
+      }
+    }
+
+    // 3. For review_sentiment_analyzer, ensure reviews and businessName are populated from Step 2
+    if (toolId === TOOL_IDS.REVIEW_SENTIMENT_ANALYZER) {
+      if (!retryInput.businessType) {
+        retryInput.businessType = extractBusinessType(run.goal);
+      }
+      if (!retryInput.businessName || !Array.isArray(retryInput.reviews) || retryInput.reviews.length === 0) {
+        const allReviewsEvidence = evidenceList.filter(
+          (e) =>
+            (e.evidenceType === "customer_reviews" ||
+              e.toolId === TOOL_IDS.BUSINESS_REVIEWS_SEARCH) &&
+            e.status !== "contradicted" &&
+            e.status !== "stale"
+        );
+        const allReviewsSteps = completedSteps.filter(
+          (s) => s.input?.toolId === TOOL_IDS.BUSINESS_REVIEWS_SEARCH
+        );
+        const reviewsEvidence = allReviewsEvidence.length > 0
+          ? allReviewsEvidence[allReviewsEvidence.length - 1]
+          : null;
+        const reviewsStep = allReviewsSteps.length > 0
+          ? allReviewsSteps[allReviewsSteps.length - 1]
+          : null;
+
+        if (!retryInput.businessName) {
+          retryInput.businessName =
+            reviewsEvidence?.data?.businessName ||
+            reviewsStep?.output?.businessName ||
+            reviewsStep?.input?.params?.businessName ||
+            reviewsStep?.input?.businessName ||
+            "Competitor";
+        }
+        if (!Array.isArray(retryInput.reviews) || retryInput.reviews.length === 0) {
+          retryInput.reviews =
+            reviewsEvidence?.data?.reviews ||
+            reviewsStep?.output?.reviews ||
+            [];
+        }
+      }
+    }
+
+    // 4. For tech_idea_analysis, ensure goal is populated
+    if (toolId === TOOL_IDS.TECH_IDEA_ANALYSIS) {
+      if (!retryInput.goal) {
+        retryInput.goal = run.goal;
+      }
+      if (run.location && !retryInput.location) {
+        retryInput.location = typeof run.location === "object" ? run.location.label || null : run.location;
+      }
+    }
+
+    const toolName = latestFailedStep.metadata?.toolName || toolId;
+
+    return {
+      action: "EXECUTE_TOOL",
+      toolId,
+      input: retryInput,
+      isRetry: true,
+      retryOfStepId:
+        latestFailedStep._id?.toString() || String(latestFailedStep._id),
+      attempt: nextAttempt,
+      logicalStepIndex,
+      reasoning: `Retry failed ${toolName} (Attempt ${nextAttempt}): ${rawErrorMsg}`,
+      stepIndex: logicalStepIndex,
+    };
+  }
+
   const nextPlannedStep = run.plan.steps.find(
-    (s) => !executedToolIds.has(s.toolId)
+    (s) => !completedToolIds.has(s.toolId)
   );
 
   if (!nextPlannedStep) {
@@ -326,7 +464,9 @@ const evaluateDeterministicNextStep = ({ run, steps, evidenceList }) => {
 
   // Apply external-call quota guard only when about to recommend an external tool execution
   const nextToolDef = registry.getTool(nextPlannedStep.toolId);
-  const isExternalTool = Boolean(nextToolDef?.external);
+  const isExternalTool = nextToolDef
+    ? Boolean(nextToolDef.external)
+    : nextPlannedStep.toolId !== TOOL_IDS.TECH_IDEA_ANALYSIS;
   if (isExternalTool) {
     const maxExternalCalls = run.budget?.maxExternalCalls || 5;
     if ((run.externalCallCount || 0) >= maxExternalCalls) {
@@ -541,6 +681,11 @@ const evaluateDeterministicNextStep = ({ run, steps, evidenceList }) => {
       reviewsStep.input.businessName.trim()
     ) {
       businessName = reviewsStep.input.businessName.trim();
+    } else if (
+      typeof reviewsStep?.input?.params?.businessName === "string" &&
+      reviewsStep.input.params.businessName.trim()
+    ) {
+      businessName = reviewsStep.input.params.businessName.trim();
     }
 
     if (!businessName) {

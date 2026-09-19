@@ -2,6 +2,7 @@ import { ObjectId } from "mongodb";
 import {
   AgentRunStateError,
   cancelAgentRun as cancelRunHelper,
+  resumeAgentRun,
   claimAgentRunSynthesis,
   createAgentRun as createRun,
   getAgentRunById,
@@ -376,7 +377,13 @@ const executeTool = async (req, res) => {
   const runId = req.params.id;
   const userId = req.user.userId;
   try {
-    const { toolId, input = {} } = req.body;
+    const {
+      toolId,
+      input = {},
+      attempt = 1,
+      retryOfStepId = null,
+      logicalStepIndex = null,
+    } = req.body;
 
     if (!toolId || typeof toolId !== "string") {
       return res.status(400).json({
@@ -390,6 +397,9 @@ const executeTool = async (req, res) => {
       userId,
       toolId: toolId.trim(),
       input,
+      attempt,
+      retryOfStepId,
+      logicalStepIndex,
     });
 
     // Check if tool execution failed due to provider quota or model failure
@@ -1318,6 +1328,267 @@ const cancelAgentRun = async (req, res) => {
   }
 };
 
+const resumeRunHandler = async (req, res) => {
+  try {
+    const runId = req.params.id;
+    const userId = req.user.userId;
+
+    if (!ObjectId.isValid(runId)) {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_RUN_ID",
+        message: "Invalid run ID",
+      });
+    }
+
+    const run = await getAgentRunById({ id: runId, userId });
+    if (!run) {
+      return res.status(404).json({
+        success: false,
+        code: "RUN_NOT_FOUND",
+        message: "Agent run not found or access denied",
+      });
+    }
+
+    const resumableStates = new Set([
+      AGENT_STATES.CANCELLED,
+      AGENT_STATES.FAILED,
+      AGENT_STATES.QUOTA_LIMITED,
+    ]);
+
+    if (!resumableStates.has(run.state)) {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_STATE",
+        message: `Cannot resume run in state '${run.state}' (must be cancelled, failed, or quota_limited)`,
+      });
+    }
+
+    const resumedRun = await resumeAgentRun({ runId, userId });
+
+    let nextDecision = null;
+    let updatedRun = resumedRun;
+    try {
+      nextDecision = await evaluateNextStep({ runId, userId });
+      if (nextDecision) {
+        const persistedRun = await updateAgentRunCurrentDecision({
+          runId,
+          userId,
+          currentDecision: nextDecision.action === "TERMINAL" ? null : nextDecision,
+        });
+        if (persistedRun) {
+          updatedRun = persistedRun;
+        }
+      }
+    } catch (evalErr) {
+      console.warn("Failed to evaluate next decision on resume:", evalErr?.message);
+    }
+
+    if (updatedRun?.conversationId) {
+      try {
+        await createConversationMessage({
+          conversationId: updatedRun.conversationId,
+          userId,
+          runId,
+          sender: "agent",
+          messageType: "status_update",
+          content: "Investigation resumed from checkpoint.",
+        });
+      } catch (msgErr) {
+        // ignore
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      run: updatedRun,
+      nextDecision,
+      validNextStates: getValidNextStates(updatedRun.state),
+    });
+  } catch (error) {
+    if (error instanceof AgentRunStateError) {
+      return res.status(400).json({
+        success: false,
+        code: error.code,
+        message: error.message,
+      });
+    }
+    console.error("Resume run error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to resume run",
+    });
+  }
+};
+
+const retryStepHandler = async (req, res) => {
+  try {
+    const runId = req.params.id;
+    const userId = req.user.userId;
+
+    if (!ObjectId.isValid(runId)) {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_RUN_ID",
+        message: "Invalid run ID",
+      });
+    }
+
+    const run = await getAgentRunById({ id: runId, userId });
+    if (!run) {
+      return res.status(404).json({
+        success: false,
+        code: "RUN_NOT_FOUND",
+        message: "Agent run not found or access denied",
+      });
+    }
+
+    const resumableStates = new Set([
+      AGENT_STATES.CANCELLED,
+      AGENT_STATES.FAILED,
+      AGENT_STATES.QUOTA_LIMITED,
+    ]);
+    if (resumableStates.has(run.state)) {
+      await resumeAgentRun({ runId, userId });
+    } else if (run.state !== AGENT_STATES.EXECUTING) {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_STATE",
+        message: `Cannot retry step when run is in state '${run.state}'`,
+      });
+    }
+
+    const steps = await getAgentStepsByRunId({ runId, userId });
+    const evidenceList = await getAgentEvidenceByRunId({ runId, userId });
+
+    const completedToolIds = new Set([
+      ...steps
+        .filter((s) => s.type === "tool_execution" && s.status === "completed")
+        .map((s) => s.input?.toolId)
+        .filter(Boolean),
+      ...evidenceList.map((e) => e.toolId).filter(Boolean),
+    ]);
+
+    const failedSteps = steps.filter(
+      (s) => s.type === "tool_execution" && s.status === "failed"
+    );
+
+    // Find the latest failed step that remains UNRESOLVED (not yet completed)
+    const lastUnresolvedFailedStep = [...failedSteps].reverse().find(
+      (fs) => fs.input?.toolId && !completedToolIds.has(fs.input.toolId)
+    );
+
+    if (!lastUnresolvedFailedStep) {
+      return res.status(400).json({
+        success: false,
+        code: "NO_FAILED_STEP",
+        message: "No unresolved failed step found to retry for this run",
+      });
+    }
+
+    const lastFailedStep = lastUnresolvedFailedStep;
+    const toolId = lastFailedStep.input?.toolId;
+    const input = req.body?.input || lastFailedStep.input?.params || (lastFailedStep.input ? { ...lastFailedStep.input } : {});
+    if (input.toolId) delete input.toolId;
+    const retryOfStepId = lastFailedStep._id.toString();
+    const attempt = (lastFailedStep.attempt || 1) + 1;
+    const logicalStepIndex =
+      lastFailedStep.logicalStepIndex || lastFailedStep.stepNumber;
+
+    const result = await executeToolStep({
+      runId,
+      userId,
+      toolId,
+      input,
+      retryOfStepId,
+      attempt,
+      logicalStepIndex,
+    });
+
+    if (result.step?.status === "failed" && result.step.error) {
+      const toolClassification = classifyProviderError(result.step.error);
+      if (toolClassification.isQuota) {
+        await updateRunState({
+          runId,
+          userId,
+          nextState: AGENT_STATES.QUOTA_LIMITED,
+          error: toolClassification.sanitizedMessage,
+        });
+      } else if (toolClassification.isModelUnavailable) {
+        await updateRunState({
+          runId,
+          userId,
+          nextState: AGENT_STATES.FAILED,
+          error: toolClassification.sanitizedMessage,
+        });
+      }
+    }
+
+    let nextDecision = null;
+    let updatedRunFromDecision = null;
+    try {
+      nextDecision = await evaluateNextStep({ runId, userId });
+      if (nextDecision) {
+        const currentRun = await getAgentRunById({ id: runId, userId });
+        if (currentRun) {
+          const processed = await processAdvisoryDecision({
+            runId,
+            userId,
+            run: currentRun,
+            decision: nextDecision,
+          });
+          nextDecision = processed.decision;
+          if (processed.run) {
+            updatedRunFromDecision = processed.run;
+          }
+        }
+      }
+    } catch (evalErr) {
+      console.warn(
+        "Could not evaluate next decision after retry:",
+        evalErr?.message
+      );
+    }
+
+    const isTerminal = nextDecision?.action === "TERMINAL";
+    if (nextDecision && !isTerminal) {
+      const persistedRun = await updateAgentRunCurrentDecision({
+        runId,
+        userId,
+        currentDecision: nextDecision,
+      });
+      if (persistedRun) {
+        updatedRunFromDecision = persistedRun;
+      }
+    } else {
+      await updateAgentRunCurrentDecision({
+        runId,
+        userId,
+        currentDecision: null,
+      });
+    }
+
+    return res.status(200).json({
+      ...result,
+      ...(updatedRunFromDecision ? { run: updatedRunFromDecision } : {}),
+      nextDecision,
+    });
+  } catch (error) {
+    if (error instanceof ToolExecutorError) {
+      return res.status(error.statusCode || 400).json({
+        success: false,
+        code: error.code,
+        message: error.message,
+      });
+    }
+    console.error("Retry step error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to retry step",
+    });
+  }
+};
+
 const getAgentRunStatus = async (req, res) => {
   try {
     const runId = req.params.id;
@@ -1736,6 +2007,8 @@ const postConversationMessageHandler = async (req, res) => {
 export {
   approveRunPlan,
   cancelAgentRun,
+  resumeRunHandler,
+  retryStepHandler,
   createAgentRun,
   executeTool,
   generateRunPlan,

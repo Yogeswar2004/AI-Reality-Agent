@@ -49,9 +49,20 @@ class ToolExecutorError extends Error {
  * @param {string} params.userId - Authenticated user ID.
  * @param {string} params.toolId - Tool identifier.
  * @param {Object} [params.input={}] - Tool input parameters.
+ * @param {number} [params.attempt=1] - Execution attempt count for this step.
+ * @param {string|null} [params.retryOfStepId=null] - Preceding failed step ID if this is a retry.
+ * @param {number|null} [params.logicalStepIndex=null] - Logical step index in the plan.
  * @returns {Promise<Object>} Execution result envelope { success, step, run }.
  */
-const executeToolStep = async ({ runId, userId, toolId, input = {} }) => {
+const executeToolStep = async ({
+  runId,
+  userId,
+  toolId,
+  input = {},
+  attempt = 1,
+  retryOfStepId = null,
+  logicalStepIndex = null,
+}) => {
   if (!ObjectId.isValid(runId)) {
     throw new ToolExecutorError("Invalid run ID", "INVALID_RUN_ID", 400);
   }
@@ -110,6 +121,9 @@ const executeToolStep = async ({ runId, userId, toolId, input = {} }) => {
   const initialStep = await createAgentStep({
     runId,
     stepNumber,
+    logicalStepIndex: logicalStepIndex || stepNumber,
+    attempt: attempt || 1,
+    retryOfStepId: retryOfStepId || null,
     type: "tool_execution",
     input: {
       toolId: cleanToolId,
@@ -149,13 +163,20 @@ const executeToolStep = async ({ runId, userId, toolId, input = {} }) => {
   let finalizedStep;
 
   if (result.error) {
+    const safeError = {
+      code: result.error.code || "EXECUTION_ERROR",
+      status: result.error.status ?? null,
+      message: result.error.message || "Unknown error",
+      provider: result.error.provider || (definition.external ? "rapidapi" : "internal"),
+    };
+
     finalizedStep = await updateAgentStep({
       stepId: initialStep._id,
       runId,
       userId,
       updates: {
         status: "failed",
-        error: result.error,
+        error: safeError,
         completedAt: now,
         metadata: {
           ...(initialStep.metadata || {}),

@@ -124,16 +124,46 @@ class BusinessReviewsAdapter extends BaseToolAdapter {
     let output;
     if (process.env.MOCK_MODE === "true") {
       if (input.businessId === "MOCK_QUOTA_ERROR") {
-        throw new Error("REVIEW_QUOTA_EXCEEDED: You have exceeded the MONTHLY quota for Requests on your current plan.");
+        const err = new Error("RapidAPI monthly quota exceeded. Please try again after quota reset or upgrade your plan.");
+        err.code = "REVIEW_QUOTA_EXCEEDED";
+        err.status = 429;
+        err.provider = "rapidapi";
+        throw err;
       }
       if (input.businessId === "MOCK_RATE_LIMIT_ERROR") {
-        const err = new Error("RATE_LIMIT_EXCEEDED: Too Many Requests. Try again in 1s.");
+        const err = new Error("RapidAPI rate limit: 1 request/second exceeded. Please wait a moment and retry.");
         err.status = 429;
         err.code = "RATE_LIMIT_EXCEEDED";
+        err.provider = "rapidapi";
+        throw err;
+      }
+      if (input.businessId === "MOCK_AUTH_ERROR") {
+        const err = new Error("RapidAPI Authentication Error: Invalid or unauthorized API key.");
+        err.status = 403;
+        err.code = "AUTH_ERROR";
+        err.provider = "rapidapi";
+        throw err;
+      }
+      if (input.businessId === "MOCK_502_ERROR") {
+        const err = new Error("RapidAPI Bad Gateway (502): upstream reviews service was unavailable. Please retry.");
+        err.status = 502;
+        err.code = "BAD_GATEWAY";
+        err.provider = "rapidapi";
         throw err;
       }
       if (input.businessId === "MOCK_500_ERROR") {
-        throw new Error("RapidAPI error 500: Internal Server Error");
+        const err = new Error("RapidAPI Server Error (500): upstream reviews service encountered an error. Please retry.");
+        err.status = 500;
+        err.code = "SERVER_ERROR";
+        err.provider = "rapidapi";
+        throw err;
+      }
+      if (input.businessId === "MOCK_TIMEOUT_ERROR") {
+        const err = new Error("RapidAPI Gateway Timeout (504): upstream reviews service timed out. Please retry.");
+        err.status = 504;
+        err.code = "TIMEOUT";
+        err.provider = "rapidapi";
+        throw err;
       }
       const fixture = TOOL_FIXTURES.business_reviews_search;
       output = {
@@ -262,6 +292,7 @@ const definition = {
   },
   access: TOOL_ACCESS.READ_ONLY,
   external: true,
+  provider: "rapidapi",
   quotaCost: DEFAULT_QUOTA_COST,
   riskLevel: TOOL_RISK.LOW,
   mockEnabled: MOCK_ENABLED,

@@ -1,3 +1,5 @@
+import { sanitizeErrorMessage } from "./providerErrors.js";
+
 /**
  * Base tool adapter interface for Phase 3.
  */
@@ -44,7 +46,7 @@ export class BaseToolAdapter {
   /**
    * Execute the tool with input validation and output validation.
    * @param {any} rawInput - The raw input from the caller.
-   * @returns {Promise<{output?: any, error?: {message:string, code:string, details?:any}}>}
+   * @returns {Promise<{output?: any, error?: {message:string, code:string, status?:number, provider?:string, details?:any}}>}
    */
   async executeTool(rawInput) {
     try {
@@ -63,8 +65,18 @@ export class BaseToolAdapter {
       // Step 5: Return structured error
       // Ensure we don't leak secrets in err.message or err.details
       const safeError = {
-        message: err.message || "Unknown error",
+        message: sanitizeErrorMessage(err.message || "Unknown error"),
         code: err.code || "EXECUTION_ERROR",
+        status: err.status ?? err.statusCode ?? null,
+        provider:
+          err.provider ||
+          this.definition?.provider ||
+          (this.definition?.id === "review_sentiment_analyzer" ||
+          this.definition?.id === "tech_idea_analysis"
+            ? "gemini"
+            : this.definition?.external
+            ? "rapidapi"
+            : "internal"),
         details: err.details ? this._sanitizeDetails(err.details) : undefined,
       };
       return { output: null, error: safeError };

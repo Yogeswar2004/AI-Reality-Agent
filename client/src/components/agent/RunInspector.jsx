@@ -17,6 +17,7 @@ function RunInspector() {
     setActiveTab,
     loadingAction,
     resetWorkspace,
+    retryStep,
   } = useAgent();
 
   const tabs = [
@@ -170,7 +171,11 @@ function RunInspector() {
         )}
 
         {activeTab === "activity" && (
-          <AuditStepList steps={steps} loading={loadingAction === "executing_step"} />
+          <AuditStepList
+            steps={steps}
+            loading={loadingAction === "executing_step" || loadingAction === "retrying_step"}
+            onRetryStep={retryStep}
+          />
         )}
 
         {activeTab === "verdict" && (

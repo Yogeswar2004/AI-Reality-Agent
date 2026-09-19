@@ -42,6 +42,8 @@ function ConversationFeed() {
     startNewInvestigation,
     approvePlan,
     executeNextStep,
+    retryStep,
+    resumeRun,
     submitClarification,
     synthesizeVerdict,
     cancelActiveRun,
@@ -307,18 +309,31 @@ function ConversationFeed() {
         )}
       </div>
 
-      {/* Controller bar for executing next tool when investigation is active */}
-      {!isSetupMode && run && run.state === "executing" && run.currentDecision?.action !== "ASK_USER" && (
-        <div style={{ padding: "0 20px 10px" }}>
-          <RunControllerBar
-            run={run}
-            onExecuteStep={executeNextStep}
-            onSynthesize={synthesizeVerdict}
-            onCancel={cancelActiveRun}
-            loading={loadingAction === "executing_step" || loadingAction === "synthesizing"}
-          />
-        </div>
-      )}
+      {/* Controller bar for executing next tool or resuming when investigation is active or halted */}
+      {!isSetupMode &&
+        run &&
+        (run.state === "executing" ||
+          run.state === "cancelled" ||
+          run.state === "failed" ||
+          run.state === "quota_limited") &&
+        run.currentDecision?.action !== "ASK_USER" && (
+          <div style={{ padding: "0 20px 10px" }}>
+            <RunControllerBar
+              run={run}
+              onExecuteStep={executeNextStep}
+              onRetryStep={retryStep}
+              onResume={resumeRun}
+              onSynthesize={synthesizeVerdict}
+              onCancel={cancelActiveRun}
+              loading={
+                loadingAction === "executing_step" ||
+                loadingAction === "synthesizing" ||
+                loadingAction === "retrying_step" ||
+                loadingAction === "resuming_run"
+              }
+            />
+          </div>
+        )}
 
       {/* Chat Message Input Bar (when thread is active) */}
       {!isSetupMode && (

@@ -95,6 +95,10 @@ const ALLOWED_TOP_LEVEL_KEYS = Object.freeze([
   "model",
   "invalidatedAssumptions",
   "suggestedFocus",
+  "isRetry",
+  "retryOfStepId",
+  "attempt",
+  "logicalStepIndex",
 ]);
 
 /**

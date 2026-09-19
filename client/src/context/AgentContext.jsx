@@ -361,10 +361,18 @@ export function AgentProvider({ children }) {
     setLoadingAction("executing_step");
 
     try {
-      const res = await api.post(`/agent/runs/${run._id}/execute-tool`, {
+      const payload = {
         toolId: nextDecision.toolId,
         input: nextDecision.input || {},
-      });
+      };
+
+      if (nextDecision.isRetry) {
+        payload.retryOfStepId = nextDecision.retryOfStepId;
+        payload.attempt = nextDecision.attempt;
+        payload.logicalStepIndex = nextDecision.logicalStepIndex;
+      }
+
+      const res = await api.post(`/agent/runs/${run._id}/execute-tool`, payload);
 
       if (res.data?.run) {
         setRun((prev) => ({ ...prev, ...res.data.run }));
@@ -381,6 +389,63 @@ export function AgentProvider({ children }) {
         await refreshRunStatus(run._id);
         await fetchSteps(run._id);
       }
+    } finally {
+      setLoadingAction("");
+    }
+  };
+
+  // Retry failed checkpoint step
+  const retryStep = async () => {
+    if (!run?._id) return;
+
+    setError("");
+    setLoadingAction("retrying_step");
+
+    try {
+      const res = await api.post(`/agent/runs/${run._id}/retry-step`);
+
+      if (res.data?.run) {
+        setRun((prev) => ({ ...prev, ...res.data.run }));
+      }
+
+      await Promise.all([
+        refreshRunStatus(run._id),
+        fetchSteps(run._id),
+        fetchEvidence(run._id),
+      ]);
+    } catch (err) {
+      setError(err.response?.data?.message || "Step retry encountered an error.");
+      if (run?._id) {
+        await refreshRunStatus(run._id);
+        await fetchSteps(run._id);
+      }
+    } finally {
+      setLoadingAction("");
+    }
+  };
+
+  // Resume investigation from checkpoint
+  const resumeRun = async () => {
+    if (!run?._id) return;
+
+    setError("");
+    setLoadingAction("resuming_run");
+
+    try {
+      const res = await api.post(`/agent/runs/${run._id}/resume`);
+
+      if (res.data?.run) {
+        setRun((prev) => ({ ...prev, ...res.data.run }));
+      }
+
+      await Promise.all([
+        refreshRunStatus(run._id),
+        fetchSteps(run._id),
+        fetchEvidence(run._id),
+        selectConversation(conversationId),
+      ]);
+    } catch (err) {
+      setError(err.response?.data?.message || "Failed to resume investigation.");
     } finally {
       setLoadingAction("");
     }
@@ -512,6 +577,8 @@ export function AgentProvider({ children }) {
     sendMessage,
     approvePlan,
     executeNextStep,
+    retryStep,
+    resumeRun,
     submitClarification,
     synthesizeVerdict,
     cancelActiveRun,

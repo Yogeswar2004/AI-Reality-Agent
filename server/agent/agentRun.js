@@ -167,6 +167,13 @@ const updateAgentRunState = async ({
     }
   }
 
+  // If returning to EXECUTING from a resumable terminal state, clear terminal blockers
+  if (terminalStates.has(currentRun.state) && nextState === AGENT_STATES.EXECUTING) {
+    updateDoc.completedAt = null;
+    updateDoc.cancellationReason = null;
+    updateDoc.error = null;
+  }
+
   const updatedRun = await collection.findOneAndUpdate(
     {
       _id: currentRun._id,
@@ -197,6 +204,41 @@ const cancelAgentRun = async ({ runId, userId, reason = "Cancelled by user" }) =
     userId,
     nextState: AGENT_STATES.CANCELLED,
     cancellationReason: cleanReason,
+  });
+};
+
+const resumeAgentRun = async ({ runId, userId }) => {
+  if (!ObjectId.isValid(runId)) {
+    return null;
+  }
+
+  const collection = getDB().collection(AGENT_RUNS_COLLECTION);
+  const currentRun = await collection.findOne({
+    _id: new ObjectId(runId),
+    userId,
+  });
+
+  if (!currentRun) {
+    return null;
+  }
+
+  const resumableStates = new Set([
+    AGENT_STATES.CANCELLED,
+    AGENT_STATES.FAILED,
+    AGENT_STATES.QUOTA_LIMITED,
+  ]);
+
+  if (!resumableStates.has(currentRun.state)) {
+    throw new AgentRunStateError(
+      `Cannot resume run in state '${currentRun.state}' (must be cancelled, failed, or quota_limited)`,
+      "INVALID_STATE"
+    );
+  }
+
+  return updateAgentRunState({
+    runId,
+    userId,
+    nextState: AGENT_STATES.EXECUTING,
   });
 };
 
@@ -813,6 +855,7 @@ export {
   updateAgentRunPlan,
   updateAgentRunState,
   cancelAgentRun,
+  resumeAgentRun,
   setAgentRunClarification,
   recordAgentRunClarificationAnswer,
   stopAgentRun,
