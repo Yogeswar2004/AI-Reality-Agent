@@ -455,6 +455,26 @@ const validatePlanSchema = (plan, options = {}) => {
       }
     }
 
+    // Ensure tech_idea_analysis has valid required parameters (goal)
+    if (cleanToolId === TOOL_IDS.TECH_IDEA_ANALYSIS) {
+      if (typeof params.goal !== "string" || !params.goal.trim()) {
+        params.goal =
+          (typeof options.goal === "string" && options.goal.trim()) ||
+          (typeof plan.goalUnderstanding === "string" && plan.goalUnderstanding.trim()) ||
+          (typeof plan.summary === "string" && plan.summary.trim()) ||
+          "";
+      } else {
+        params.goal = params.goal.trim();
+      }
+
+      if (options.location && (params.location === undefined || params.location === null)) {
+        params.location =
+          typeof options.location === "object"
+            ? options.location.label || null
+            : String(options.location);
+      }
+    }
+
     // Dependencies check
     let dependsOnStep = null;
     if (step.dependsOnStep !== undefined && step.dependsOnStep !== null) {

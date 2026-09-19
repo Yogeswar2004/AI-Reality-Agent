@@ -608,6 +608,35 @@ const validateDecisionSchema = (decision, options = {}) => {
       }
     }
 
+    // Evidence / Input Grounding Firewall for tech_idea_analysis
+    if (cleanToolId === TOOL_IDS.TECH_IDEA_ANALYSIS) {
+      if (
+        typeof decision.input?.goal !== "string" ||
+        !decision.input.goal.trim()
+      ) {
+        if (run?.goal) {
+          decision.input = decision.input || {};
+          decision.input.goal = run.goal.trim();
+        } else {
+          throw new LLMDecisionError(
+            "goal is required in input for tech_idea_analysis and must be a non-empty string",
+            "MISSING_GOAL",
+            400
+          );
+        }
+      } else {
+        decision.input.goal = decision.input.goal.trim();
+      }
+
+      if (run?.location && (decision.input?.location === undefined || decision.input?.location === null)) {
+        decision.input = decision.input || {};
+        decision.input.location =
+          typeof run.location === "object"
+            ? run.location.label || null
+            : String(run.location);
+      }
+    }
+
     // Evidence / Input Grounding Firewall for nearby_business_search
     if (cleanToolId === TOOL_IDS.NEARBY_BUSINESS_SEARCH) {
       const isGeneric = (val) =>
@@ -1248,11 +1277,29 @@ const getMockDecision = ({
 
   // Tech idea analysis
   if (nextPlannedStep.toolId === TOOL_IDS.TECH_IDEA_ANALYSIS) {
+    const existingParams =
+      nextPlannedStep.params && typeof nextPlannedStep.params === "object"
+        ? nextPlannedStep.params
+        : {};
+    const goal =
+      typeof existingParams.goal === "string" && existingParams.goal.trim()
+        ? existingParams.goal.trim()
+        : run?.goal;
+    const location =
+      existingParams.location !== undefined
+        ? existingParams.location
+        : typeof run?.location === "object"
+        ? run?.location?.label || null
+        : run?.location || null;
+
     return validateDecisionSchema(
       {
         action: "EXECUTE_TOOL",
         toolId: nextPlannedStep.toolId,
-        input: nextPlannedStep.params || { goal: run?.goal, location: run?.location },
+        input: {
+          goal,
+          ...(location ? { location } : {}),
+        },
         reasoning: nextPlannedStep.description || "Analyze tech product viability",
         stepIndex: nextPlannedStep.stepIndex,
         source: "mock",

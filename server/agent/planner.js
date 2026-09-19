@@ -479,11 +479,31 @@ const evaluateDeterministicNextStep = ({ run, steps, evidenceList }) => {
 
   // Evidence-derived parameter extraction for next step
   if (nextPlannedStep.toolId === TOOL_IDS.TECH_IDEA_ANALYSIS) {
+    const existingParams =
+      nextPlannedStep.params && typeof nextPlannedStep.params === "object"
+        ? nextPlannedStep.params
+        : {};
+    const goal =
+      typeof existingParams.goal === "string" && existingParams.goal.trim()
+        ? existingParams.goal.trim()
+        : run.goal;
+    const location =
+      existingParams.location !== undefined
+        ? existingParams.location
+        : typeof run.location === "object"
+        ? run.location?.label || null
+        : run.location || null;
+
     return {
       action: "EXECUTE_TOOL",
       toolId: nextPlannedStep.toolId,
-      input: nextPlannedStep.params,
-      reasoning: nextPlannedStep.description,
+      input: {
+        goal,
+        ...(location ? { location } : {}),
+      },
+      reasoning:
+        nextPlannedStep.description ||
+        "Analyze technical feasibility, suggested tech stack, and market fit",
       stepIndex: nextPlannedStep.stepIndex,
     };
   }

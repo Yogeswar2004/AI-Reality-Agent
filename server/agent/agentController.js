@@ -22,6 +22,7 @@ import {
 } from "./agentStep.js";
 import { AGENT_STATES, getValidNextStates } from "./agentState.js";
 import { ToolExecutorError, executeToolStep } from "./toolExecutor.js";
+import { TOOL_IDS } from "./toolConstants.js";
 import {
   PlannerError,
   evaluateNextStep,
@@ -392,11 +393,28 @@ const executeTool = async (req, res) => {
       });
     }
 
+    const cleanToolId = toolId.trim();
+    const toolInput = { ...(input || {}) };
+    if (cleanToolId === TOOL_IDS.TECH_IDEA_ANALYSIS) {
+      if (typeof toolInput.goal !== "string" || !toolInput.goal.trim()) {
+        const run = await getAgentRunById({ id: runId, userId });
+        if (run?.goal) {
+          toolInput.goal = run.goal.trim();
+        }
+        if (run?.location && (toolInput.location === undefined || toolInput.location === null)) {
+          toolInput.location =
+            typeof run.location === "object"
+              ? run.location.label || null
+              : String(run.location);
+        }
+      }
+    }
+
     const result = await executeToolStep({
       runId,
       userId,
-      toolId: toolId.trim(),
-      input,
+      toolId: cleanToolId,
+      input: toolInput,
       attempt,
       retryOfStepId,
       logicalStepIndex,
@@ -1490,6 +1508,21 @@ const retryStepHandler = async (req, res) => {
     const toolId = lastFailedStep.input?.toolId;
     const input = req.body?.input || lastFailedStep.input?.params || (lastFailedStep.input ? { ...lastFailedStep.input } : {});
     if (input.toolId) delete input.toolId;
+
+    if (toolId === TOOL_IDS.TECH_IDEA_ANALYSIS) {
+      if (typeof input.goal !== "string" || !input.goal.trim()) {
+        if (run?.goal) {
+          input.goal = run.goal.trim();
+        }
+      }
+      if (run?.location && (input.location === undefined || input.location === null)) {
+        input.location =
+          typeof run.location === "object"
+            ? run.location.label || null
+            : String(run.location);
+      }
+    }
+
     const retryOfStepId = lastFailedStep._id.toString();
     const attempt = (lastFailedStep.attempt || 1) + 1;
     const logicalStepIndex =
