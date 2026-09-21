@@ -241,8 +241,8 @@ export const mapAgentRunToLegacyIdea = (run, { detailed = false, evidenceList = 
  * - Deletes the agent run matching { _id: runId, userId }.
  * - Deletes agent_steps matching { runId }.
  * - Deletes agent_evidence matching { runId, userId }.
- * - Deletes agent_conversation_messages matching { runId, userId } (preserving unrelated messages).
- * - Updates agent_conversations matching { activeRunId: runId, userId } to clear activeRunId (preserving conversation history).
+ * - Deletes agent_conversation_messages matching this run and its linked conversation.
+ * - Deletes the linked conversation from agent_conversations (preventing ghost threads in sidebar).
  * - Never deletes from the legacy `ideas` collection.
  *
  * @param {Object} params
@@ -259,7 +259,19 @@ export const cascadeDeleteAgentRun = async ({ runId, userId, db }) => {
   const runOid = new ObjectId(String(runId));
   const userIdStr = String(userId);
 
-  // 1. Verify and delete the run itself
+  // 1. Fetch the run first so we can identify its conversationId (if findOne is supported)
+  let run = null;
+  if (typeof db.collection("agent_runs").findOne === "function") {
+    run = await db.collection("agent_runs").findOne({
+      _id: runOid,
+      userId: userIdStr,
+    });
+    if (!run) {
+      return { success: false, deletedCount: 0 };
+    }
+  }
+
+  // 2. Verify and delete the run itself
   const runResult = await db.collection("agent_runs").deleteOne({
     _id: runOid,
     userId: userIdStr,
@@ -269,19 +281,51 @@ export const cascadeDeleteAgentRun = async ({ runId, userId, db }) => {
     return { success: false, deletedCount: 0 };
   }
 
-  // 2. Cascade delete dependent collections in parallel with strict tenant boundaries
+  let linkedConvId = run?.conversationId && ObjectId.isValid(run.conversationId)
+    ? new ObjectId(String(run.conversationId))
+    : null;
+
+  // Fallback: If run did not store conversationId, check agent_conversations by activeRunId
+  if (!linkedConvId && typeof db.collection("agent_conversations").findOne === "function") {
+    const conv = await db.collection("agent_conversations").findOne({
+      activeRunId: runOid,
+      userId: userIdStr,
+    });
+    if (conv?._id) {
+      linkedConvId = new ObjectId(String(conv._id));
+    }
+  }
+
+  const conversationFilter = linkedConvId
+    ? {
+        $or: [{ _id: linkedConvId }, { activeRunId: runOid }],
+        userId: userIdStr,
+      }
+    : {
+        activeRunId: runOid,
+        userId: userIdStr,
+      };
+
+  const messageFilter = linkedConvId
+    ? {
+        $or: [{ runId: runOid }, { conversationId: linkedConvId }],
+        userId: userIdStr,
+      }
+    : {
+        runId: runOid,
+        userId: userIdStr,
+      };
+
+  // 3. Cascade delete dependent collections in parallel with strict tenant boundaries
   await Promise.all([
     // Delete execution steps belonging to this run
     db.collection("agent_steps").deleteMany({ runId: runOid }),
     // Delete evidence gathered for this run
     db.collection("agent_evidence").deleteMany({ runId: runOid, userId: userIdStr }),
-    // Delete ONLY messages generated for this run
-    db.collection("agent_conversation_messages").deleteMany({ runId: runOid, userId: userIdStr }),
-    // Clear activeRunId from linked conversation without deleting the conversation container
-    db.collection("agent_conversations").updateOne(
-      { activeRunId: runOid, userId: userIdStr },
-      { $set: { activeRunId: null, updatedAt: new Date() } }
-    ),
+    // Delete all messages belonging to this run and/or its conversation
+    db.collection("agent_conversation_messages").deleteMany(messageFilter),
+    // Delete the linked conversation from agent_conversations
+    db.collection("agent_conversations").deleteMany(conversationFilter),
   ]);
 
   return { success: true, deletedCount: 1 };

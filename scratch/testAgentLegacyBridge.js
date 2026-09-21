@@ -504,17 +504,25 @@ console.log("Starting Agent Legacy Bridge Test Suite...\n");
 }
 
 // ============================================================================
-// Test 13: Agent Cascade Deletion Execution
+// Test 13: Agent Cascade Deletion Execution (Including Conversation)
 // ============================================================================
 {
-  console.log("Test 13: Agent cascade deletion cleans up all dependent collections");
+  console.log("Test 13: Agent cascade deletion cleans up all dependent collections and linked conversation");
 
   const runOid = new ObjectId();
+  const convOid = new ObjectId();
   const userId = "u100";
 
   const calls = [];
   const mockDb = {
     collection: (name) => ({
+      findOne: async (filter) => {
+        calls.push({ op: "findOne", collection: name, filter });
+        if (name === "agent_runs") {
+          return { _id: runOid, userId, conversationId: convOid };
+        }
+        return null;
+      },
       deleteOne: async (filter) => {
         calls.push({ op: "deleteOne", collection: name, filter });
         return { deletedCount: 1 };
@@ -522,10 +530,6 @@ console.log("Starting Agent Legacy Bridge Test Suite...\n");
       deleteMany: async (filter) => {
         calls.push({ op: "deleteMany", collection: name, filter });
         return { deletedCount: 3 };
-      },
-      updateOne: async (filter, update) => {
-        calls.push({ op: "updateOne", collection: name, filter, update });
-        return { modifiedCount: 1 };
       },
     }),
   };
@@ -535,7 +539,7 @@ console.log("Starting Agent Legacy Bridge Test Suite...\n");
   assert.equal(result.success, true);
   assert.equal(result.deletedCount, 1);
 
-  // Verify all 5 operations were executed
+  // Verify all 5 collections were touched
   const collectionsTouched = calls.map((c) => c.collection);
   assert.ok(collectionsTouched.includes("agent_runs"));
   assert.ok(collectionsTouched.includes("agent_steps"));
@@ -543,22 +547,30 @@ console.log("Starting Agent Legacy Bridge Test Suite...\n");
   assert.ok(collectionsTouched.includes("agent_conversation_messages"));
   assert.ok(collectionsTouched.includes("agent_conversations"));
 
-  console.log("✓ Test 13 Passed: Agent cascade deletion executed across all required collections.\n");
+  // Verify agent_conversations was deleted via deleteMany with strict tenant filter
+  const convDeleteCall = calls.find((c) => c.collection === "agent_conversations" && c.op === "deleteMany");
+  assert.ok(convDeleteCall, "agent_conversations must be deleted");
+  assert.equal(convDeleteCall.filter.userId, userId);
+
+  console.log("✓ Test 13 Passed: Agent cascade deletion cleans up all dependent collections and linked conversation.\n");
 }
 
 // ============================================================================
 // Test 14: Conversation Message Cleanup Safety (Preserves Unrelated Messages)
 // ============================================================================
 {
-  console.log("Test 14: Conversation message cleanup safety (only deletes run-scoped messages)");
+  console.log("Test 14: Conversation message cleanup safety (only deletes run/conversation-scoped messages)");
 
   const runOid = new ObjectId();
+  const convOid = new ObjectId();
   const otherRunOid = new ObjectId();
+  const otherConvOid = new ObjectId();
   const userId = "u100";
 
   let deletedQuery = null;
   const mockDb = {
     collection: (name) => ({
+      findOne: async () => ({ _id: runOid, userId, conversationId: convOid }),
       deleteOne: async () => ({ deletedCount: 1 }),
       deleteMany: async (query) => {
         if (name === "agent_conversation_messages") {
@@ -566,19 +578,115 @@ console.log("Starting Agent Legacy Bridge Test Suite...\n");
         }
         return { deletedCount: 1 };
       },
-      updateOne: async () => ({ modifiedCount: 1 }),
     }),
   };
 
   await cascadeDeleteAgentRun({ runId: runOid.toString(), userId, db: mockDb });
 
   assert.ok(deletedQuery !== null);
-  // Verify that the query specifically filters by runId AND userId
-  assert.equal(deletedQuery.runId.toString(), runOid.toString());
+  // Verify that the query specifically filters by runId/conversationId AND userId
   assert.equal(deletedQuery.userId, userId);
-  assert.notEqual(deletedQuery.runId.toString(), otherRunOid.toString());
+  const orClauses = deletedQuery.$or || [{ runId: deletedQuery.runId }];
+  const hasRunOid = orClauses.some((c) => c.runId && c.runId.toString() === runOid.toString());
+  assert.ok(hasRunOid, "Must target targeted runId");
+  const hasOtherRunOid = orClauses.some((c) => c.runId && c.runId.toString() === otherRunOid.toString());
+  assert.ok(!hasOtherRunOid, "Must NOT target other runId");
+  const hasOtherConvOid = orClauses.some((c) => c.conversationId && c.conversationId.toString() === otherConvOid.toString());
+  assert.ok(!hasOtherConvOid, "Must NOT target other conversationId");
 
-  console.log("✓ Test 14 Passed: Only messages with the targeted runId are deleted.\n");
+  console.log("✓ Test 14 Passed: Only messages with the targeted run/conversation are deleted.\n");
+}
+
+// ============================================================================
+// Test 14.1: Ghost Conversation Prevention & Unrelated Conversations Preserved
+// ============================================================================
+{
+  console.log("Test 14.1: Ghost conversation prevention & unrelated conversations preserved");
+
+  const runA = new ObjectId();
+  const convA = new ObjectId();
+  const runB = new ObjectId();
+  const convB = new ObjectId();
+  const userId = "user-100";
+
+  const dbState = {
+    agent_runs: [
+      { _id: runA, userId, conversationId: convA, goal: "Idea A" },
+      { _id: runB, userId, conversationId: convB, goal: "Idea B" },
+    ],
+    agent_conversations: [
+      { _id: convA, userId, activeRunId: runA, title: "Idea A" },
+      { _id: convB, userId, activeRunId: runB, title: "Idea B" },
+    ],
+    agent_conversation_messages: [
+      { _id: new ObjectId(), conversationId: convA, runId: runA, userId, content: "Msg A1" },
+      { _id: new ObjectId(), conversationId: convA, runId: null, userId, content: "Initial Goal A" },
+      { _id: new ObjectId(), conversationId: convB, runId: runB, userId, content: "Msg B1" },
+    ],
+  };
+
+  const mockDb = {
+    collection: (name) => ({
+      findOne: async (filter) => {
+        return dbState[name]?.find((doc) => {
+          if (filter._id && doc._id.toString() !== filter._id.toString()) return false;
+          if (filter.userId && doc.userId !== filter.userId) return false;
+          if (filter.activeRunId && doc.activeRunId?.toString() !== filter.activeRunId.toString()) return false;
+          return true;
+        }) || null;
+      },
+      deleteOne: async (filter) => {
+        const idx = dbState[name]?.findIndex((doc) => {
+          if (filter._id && doc._id.toString() !== filter._id.toString()) return false;
+          if (filter.userId && doc.userId !== filter.userId) return false;
+          return true;
+        });
+        if (idx !== undefined && idx >= 0) {
+          dbState[name].splice(idx, 1);
+          return { deletedCount: 1 };
+        }
+        return { deletedCount: 0 };
+      },
+      deleteMany: async (filter) => {
+        if (!dbState[name]) return { deletedCount: 0 };
+        const initialLen = dbState[name].length;
+        dbState[name] = dbState[name].filter((doc) => {
+          if (filter.userId && doc.userId !== filter.userId) return true; // preserve other users
+          if (filter.$or) {
+            const matchesAny = filter.$or.some((clause) => {
+              if (clause.runId && doc.runId?.toString() === clause.runId.toString()) return true;
+              if (clause.conversationId && doc.conversationId?.toString() === clause.conversationId.toString()) return true;
+              if (clause._id && doc._id?.toString() === clause._id.toString()) return true;
+              if (clause.activeRunId && doc.activeRunId?.toString() === clause.activeRunId.toString()) return true;
+              return false;
+            });
+            return !matchesAny;
+          }
+          if (filter.runId && doc.runId?.toString() === filter.runId.toString()) return false;
+          return true;
+        });
+        return { deletedCount: initialLen - dbState[name].length };
+      },
+    }),
+  };
+
+  // Delete Idea A (run A)
+  const res = await cascadeDeleteAgentRun({ runId: runA.toString(), userId, db: mockDb });
+  assert.equal(res.success, true);
+
+  // 1. Run A must be deleted, Run B must remain
+  assert.equal(dbState.agent_runs.some((r) => r._id.toString() === runA.toString()), false);
+  assert.equal(dbState.agent_runs.some((r) => r._id.toString() === runB.toString()), true);
+
+  // 2. Conversation A must be deleted (no ghost thread), Conversation B must remain
+  assert.equal(dbState.agent_conversations.some((c) => c._id.toString() === convA.toString()), false);
+  assert.equal(dbState.agent_conversations.some((c) => c._id.toString() === convB.toString()), true);
+
+  // 3. Messages for Conv A (including initial goal with runId: null) must be deleted, Conv B messages preserved
+  assert.equal(dbState.agent_conversation_messages.some((m) => m.conversationId.toString() === convA.toString()), false);
+  assert.equal(dbState.agent_conversation_messages.some((m) => m.conversationId.toString() === convB.toString()), true);
+
+  console.log("✓ Test 14.1 Passed: Ghost conversation removed and unrelated conversations preserved.\n");
 }
 
 // ============================================================================

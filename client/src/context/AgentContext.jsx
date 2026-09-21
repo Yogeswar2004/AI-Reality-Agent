@@ -198,6 +198,17 @@ export function AgentProvider({ children }) {
           .catch((err) => {
             console.warn("Could not restore active conversation:", err?.message);
             localStorage.removeItem("active_agent_conversation_id");
+            localStorage.removeItem("active_agent_run_id");
+            if (active) {
+              setConversationId(null);
+              setActiveConversation(null);
+              setRun(null);
+              setPlan(null);
+              setSteps([]);
+              setEvidence([]);
+              setFinalOutput(null);
+              setMessages([]);
+            }
           });
       }
     }
